@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://taipanbox.dev/agent-passport/v0.2/agent-event.schema.json",
+  "title": "TAIPANBOX agent-event envelope",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema", "ts", "source", "type", "agent_id"],
+  "properties": {
+    "schema": { "const": "taipanbox.dev/agent-event/v0.2" },
+    "ts": { "type": "string", "format": "date-time" },
+    "source": { "type": "string", "minLength": 1 },
+    "type": { "type": "string", "minLength": 1 },
+    "agent_id": { "type": "string", "pattern": "^agent://[a-z0-9.-]+/[a-z0-9._/-]+$", "maxLength": 255 },
+    "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
+    "run_id": { "type": "string" },
+    "on_behalf_of": { "type": "array", "items": { "type": "string", "pattern": "^(agent|user)://" } },
+    "data": { "type": "object", "additionalProperties": true },
+    "prev_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

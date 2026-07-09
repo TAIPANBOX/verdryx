@@ -1,0 +1,5 @@
+{"outcome": "case_resolved", "cost_usd": 0.10}
+{"outcome": "case_resolved", "cost_usd": 0.20}
+{"outcome": "escalated", "cost_usd": 0.50}
+{"outcome": "abandoned", "cost_usd": 0.05}
+{"outcome": "abandoned", "cost_usd": 0.03}

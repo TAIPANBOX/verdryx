@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "verdryx"
+version = "0.1.0"
+description = "Quality-evaluation and drift plane for the TAIPANBOX agent-governance stack"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "TAIPANBOX", email = "yukosemail@gmail.com" }]
+keywords = ["ai", "agents", "evaluation", "drift", "finops", "quality"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40.0"]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "jsonschema>=4.20",
+]
+
+[project.scripts]
+verdryx = "verdryx.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/TAIPANBOX/verdryx"
+Repository = "https://github.com/TAIPANBOX/verdryx"
+Issues = "https://github.com/TAIPANBOX/verdryx/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["verdryx"]
+# Ship the PEP 561 marker so downstream consumers get our type hints.
+force-include = { "verdryx/py.typed" = "verdryx/py.typed" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "RUF", "SIM"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
