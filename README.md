@@ -70,10 +70,12 @@ pip install -e .
 ```
 
 For the real LLM-judge adapter (`AnthropicAdapter`), add the `anthropic`
-extra:
+extra. For reading tokenfuse Parquet traces directly (`read_parquet`,
+`cost-per-correct --traces`), add the `traces` extra:
 
 ```bash
 pip install -e '.[anthropic]'
+pip install -e '.[traces]'
 ```
 
 ## Quick start
@@ -91,9 +93,13 @@ verdryx baseline <run-id-printed-above> --db verdryx.db --label "v1"
 verdryx eval evalset.json --model stub --db verdryx.db
 verdryx drift --baseline <baseline-id> --db verdryx.db --window 3
 
-# Unit economics from a tokenfuse outcomes export (NDJSON or CSV of
-# {"outcome": ..., "cost_usd": ...} records):
+# Unit economics from a tokenfuse outcomes export (NDJSON, CSV, or Parquet
+# of {"outcome": ..., "cost_usd": ...} records):
 verdryx cost-per-correct --input outcomes.ndjson
+
+# ...or straight from a tokenfuse Parquet trace directory (requires the
+# `traces` extra):
+verdryx cost-per-correct --traces $TOKENFUSE_DATA_DIR
 ```
 
 `--model stub` selects a deterministic, network-free adapter -- useful for
@@ -182,7 +188,13 @@ protocol (`complete()` + `judge()`). Two are provided:
   `base_url`, and `api_key` are accepted the same way, and `base_url` lets
   judge/completion calls route through a proxy (e.g. TokenFuse) instead of
   hitting Anthropic directly. Verdryx does not depend on the `engram`
-  package; this is the same construction pattern applied locally.
+  package; this is the same construction pattern applied locally. Its
+  `judge()` calls also price themselves against `verdryx.pricing.PriceBook`
+  (a Python port of TokenFuse's own default price book), so an `llm_judge`
+  case's `Score.cost_usd` is a real dollar figure, not the `0.0` placeholder
+  the other three graders leave in place (they make no model call, so there
+  is nothing to price). Pass `price_book=` to price against your own table
+  instead.
 
 The candidate output a judge grades is wrapped in an `<output>` tag with an
 instruction to treat it as inert data, the same delimited-block technique
@@ -222,15 +234,22 @@ input, plus an `overall` row pooling everything. `.resolved`, `.escalated`,
 and `.abandoned` are named accessors for the three default tags;
 `.get(tag)` works for any custom tag.
 
-`load_records(path)` reads `.ndjson`/`.jsonl` or `.csv` and dispatches
-automatically; `verdryx cost-per-correct --input <path>` wraps both in one
-CLI command.
+`load_records(path)` reads `.ndjson`/`.jsonl`, `.csv`, a single `.parquet`
+file, or a directory of `.parquet` files, and dispatches automatically;
+`verdryx cost-per-correct --input <path>` (file) or `--traces <dir>`
+(directory of tokenfuse Parquet segments, e.g. `TOKENFUSE_DATA_DIR`) wraps
+all of them in one CLI command.
 
-This module intentionally does not read Parquet traces or reproduce
-tokenfuse-core's "last non-empty outcome tag per run wins" aggregation
-(`tokenfuse`'s `crates/core/src/outcomes.rs`) -- it assumes that has already
-happened upstream and each input record is one already-resolved outcome.
-Reading Parquet traces directly is a documented later enhancement.
+`read_parquet` (requires the `traces` extra: `pip install -e '.[traces]'`)
+reads tokenfuse's `outcome` and `cost_microusd` trace columns directly
+(`tokenfuse`'s `crates/gateway/src/sink.rs`), converting microdollars to
+`cost_usd` and dropping untagged rows (most rows in a raw trace: tokenfuse
+expects only a run's final call to carry the outcome tag). It does not
+reproduce tokenfuse-core's full "last non-empty outcome tag per run wins"
+aggregation (`tokenfuse`'s `crates/core/src/outcomes.rs`) -- that still
+happens upstream, e.g. via `tokenfuse outcomes --json`, for a run whose
+agent tags more than one of its calls. Reproducing that reduction inside
+Verdryx itself remains a documented later enhancement.
 
 ## Events
 
@@ -284,7 +303,7 @@ slipping?*
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev]'
+pip install -e '.[dev,traces]'
 
 pytest              # run the test suite
 ruff check .        # lint
@@ -292,7 +311,9 @@ ruff format .       # format
 ```
 
 All eval/judge network calls are behind the injected `LLMAdapter` protocol,
-so the test suite runs fully offline against `StubLLMAdapter`.
+so the test suite runs fully offline against `StubLLMAdapter`. The `traces`
+extra is optional -- without it, the Parquet-reading tests skip themselves
+via `pytest.importorskip` instead of failing.
 
 ## License
 

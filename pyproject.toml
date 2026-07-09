@@ -25,6 +25,7 @@ dependencies = []
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40.0"]
+traces = ["pyarrow>=14.0"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

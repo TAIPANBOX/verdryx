@@ -283,6 +283,52 @@ def test_cost_per_correct_command_prints_report(tmp_path, capsys) -> None:
     assert "overall" in out
 
 
+def test_cost_per_correct_command_accepts_parquet_file_via_input(
+    tmp_path, capsys, pyarrow_and_parquet
+) -> None:
+    pa, pq = pyarrow_and_parquet
+    table = pa.table({"outcome": ["case_resolved"], "cost_microusd": [100_000]})
+    path = tmp_path / "trace.parquet"
+    pq.write_table(table, path)
+
+    main(["cost-per-correct", "--input", str(path)])
+    out = capsys.readouterr().out
+    assert "case_resolved" in out
+    assert "overall" in out
+
+
+def test_cost_per_correct_command_accepts_traces_directory(
+    tmp_path, capsys, pyarrow_and_parquet
+) -> None:
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "outcome": ["case_resolved", "escalated"],
+            "cost_microusd": [100_000, 500_000],
+        }
+    )
+    pq.write_table(table, tmp_path / "calls-00000000.parquet")
+
+    main(["cost-per-correct", "--traces", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "Cost per outcome" in out
+    assert str(tmp_path) in out
+    assert "case_resolved" in out
+    assert "escalated" in out
+
+
+def test_cost_per_correct_command_requires_input_or_traces() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["cost-per-correct"])
+    assert exc_info.value.code == 2  # argparse's own usage-error exit code
+
+
+def test_cost_per_correct_command_input_and_traces_are_mutually_exclusive(tmp_path) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["cost-per-correct", "--input", "a.ndjson", "--traces", str(tmp_path)])
+    assert exc_info.value.code == 2
+
+
 def test_version_command_prints_version(capsys) -> None:
     main(["version"])
     out = capsys.readouterr().out.strip()

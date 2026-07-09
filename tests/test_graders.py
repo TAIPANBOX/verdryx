@@ -26,6 +26,7 @@ from verdryx.graders import (
     build_graders,
 )
 from verdryx.models import DEFAULT_OUTCOME_SCORES, EvalCase, GraderKind
+from verdryx.pricing import ModelPrice, PriceBook
 
 # ------------------------------------------------------------------
 # ExactGrader
@@ -148,11 +149,20 @@ def test_stub_llm_adapter_is_deterministic_and_records_calls() -> None:
     text, tokens = adapter.complete("some prompt")
     assert text == "fixed output"
     assert tokens == 12
-    value, jtokens = adapter.judge("prompt", "output", "rubric")
+    value, jtokens, jcost = adapter.judge("prompt", "output", "rubric")
     assert value == 0.75
     assert jtokens == 12
+    assert jcost == 0.0
     assert adapter.completions == ["some prompt"]
     assert adapter.judgements == [("prompt", "output", "rubric")]
+
+
+def test_stub_llm_adapter_judge_reports_injected_cost_usd() -> None:
+    adapter = StubLLMAdapter(judge_value=0.9, tokens=100, cost_usd=0.0035)
+    value, tokens, cost_usd = adapter.judge("prompt", "output", "rubric")
+    assert value == 0.9
+    assert tokens == 100
+    assert cost_usd == 0.0035
 
 
 def test_stub_llm_adapter_satisfies_llm_adapter_protocol() -> None:
@@ -166,7 +176,19 @@ def test_llm_judge_grader_uses_stub_adapter_no_network() -> None:
     result = grader.grade(case, "some output")
     assert result.value == 0.6
     assert result.tokens == 7
+    assert result.cost_usd == 0.0
     assert adapter.judgements == [("p", "some output", "be nice")]
+
+
+def test_llm_judge_grader_threads_cost_usd_from_adapter() -> None:
+    """GradeResult.cost_usd comes straight from the adapter's judge() --
+    LLMJudgeGrader does no pricing of its own (see AnthropicAdapter for the
+    adapter that actually prices itself, via verdryx.pricing.PriceBook)."""
+    adapter = StubLLMAdapter(judge_value=0.9, tokens=100, cost_usd=0.0042)
+    grader = LLMJudgeGrader(adapter)
+    case = EvalCase(id="c1", prompt="p", rubric="be nice", grader=GraderKind.LLM_JUDGE)
+    result = grader.grade(case, "some output")
+    assert result.cost_usd == 0.0042
 
 
 def test_llm_judge_grader_requires_rubric() -> None:
@@ -306,7 +328,7 @@ def test_anthropic_adapter_judge_parses_score_from_response() -> None:
     )
     mock_client.messages.create.return_value = response
     with patch.object(adapter, "_get_client", return_value=mock_client):
-        value, tokens = adapter.judge("prompt", "output", "rubric")
+        value, tokens, _cost_usd = adapter.judge("prompt", "output", "rubric")
     assert value == pytest.approx(0.8)
     assert tokens == 11
 
@@ -320,7 +342,7 @@ def test_anthropic_adapter_judge_clamps_out_of_range_score() -> None:
     )
     mock_client.messages.create.return_value = response
     with patch.object(adapter, "_get_client", return_value=mock_client):
-        value, _tokens = adapter.judge("prompt", "output", "rubric")
+        value, _tokens, _cost_usd = adapter.judge("prompt", "output", "rubric")
     assert value == 1.0
 
 
@@ -332,7 +354,7 @@ def test_anthropic_adapter_judge_survives_empty_response() -> None:
     response = SimpleNamespace(content=[], usage=SimpleNamespace(input_tokens=1, output_tokens=0))
     mock_client.messages.create.return_value = response
     with patch.object(adapter, "_get_client", return_value=mock_client):
-        value, _tokens = adapter.judge("prompt", "output", "rubric")
+        value, _tokens, _cost_usd = adapter.judge("prompt", "output", "rubric")
     assert value == 0.0
 
 
@@ -345,8 +367,58 @@ def test_anthropic_adapter_judge_survives_non_numeric_response() -> None:
     )
     mock_client.messages.create.return_value = response
     with patch.object(adapter, "_get_client", return_value=mock_client):
-        value, _tokens = adapter.judge("prompt", "output", "rubric")
+        value, _tokens, _cost_usd = adapter.judge("prompt", "output", "rubric")
     assert value == 0.0
+
+
+# ------------------------------------------------------------------
+# AnthropicAdapter -- judge() cost_usd via PriceBook (the LLM judge path
+# that previously left Score.cost_usd hardcoded at 0.0)
+# ------------------------------------------------------------------
+
+
+def test_anthropic_adapter_judge_prices_known_model_via_default_price_book() -> None:
+    """AnthropicAdapter()'s default model (claude-haiku-4-5-20251001) is an
+    exact PriceBook.default() entry: $1.00 / $5.00 per Mtok input/output."""
+    adapter = AnthropicAdapter()
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[SimpleNamespace(text="0.8")],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=1),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        _value, _tokens, cost_usd = adapter.judge("prompt", "output", "rubric")
+    # 10 * 1.00/1e6 + 1 * 5.00/1e6 = 0.00001 + 0.000005 = 0.000015
+    assert cost_usd == pytest.approx(0.000015)
+
+
+def test_anthropic_adapter_judge_prices_unknown_model_via_conservative_fallback() -> None:
+    adapter = AnthropicAdapter(model="some-future-model-nobody-has-priced-yet")
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[SimpleNamespace(text="0.5")],
+        usage=SimpleNamespace(input_tokens=1_000_000, output_tokens=1_000_000),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        _value, _tokens, cost_usd = adapter.judge("prompt", "output", "rubric")
+    # Fallback: $15.00 / $75.00 per Mtok -> 15 + 75 = 90 for 1M/1M tokens.
+    assert cost_usd == pytest.approx(90.0)
+
+
+def test_anthropic_adapter_judge_uses_injected_price_book() -> None:
+    custom_book = PriceBook().with_price("weird-model", ModelPrice(1.0, 1.0))
+    adapter = AnthropicAdapter(model="weird-model", price_book=custom_book)
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[SimpleNamespace(text="1")],
+        usage=SimpleNamespace(input_tokens=1_000_000, output_tokens=0),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        _value, _tokens, cost_usd = adapter.judge("prompt", "output", "rubric")
+    assert cost_usd == pytest.approx(1.0)
 
 
 # ------------------------------------------------------------------

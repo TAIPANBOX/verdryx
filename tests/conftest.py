@@ -58,3 +58,13 @@ def sample_evalset_path(tmp_path: Path, sample_evalset: EvalSet) -> Path:
     path = tmp_path / "evalset.json"
     sample_evalset.save(path)
     return path
+
+
+@pytest.fixture()
+def pyarrow_and_parquet():
+    """(pyarrow, pyarrow.parquet), or skip the test if pyarrow (the
+    `traces` extra) isn't installed. Shared by tests/test_costper.py and
+    tests/test_cli.py -- both write small Parquet trace fixtures."""
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    return pa, pq

@@ -6,7 +6,7 @@ It never manipulates outputs and never attacks anything; see README.md.
 """
 
 from verdryx.config import Config
-from verdryx.costper import cost_per_outcome, load_records
+from verdryx.costper import cost_per_outcome, load_records, read_parquet
 from verdryx.drift import DEFAULT_THRESHOLD, compute_drift
 from verdryx.events import EventLog, resolve_events_path
 from verdryx.graders import (
@@ -36,6 +36,7 @@ from verdryx.models import (
     OutcomeCost,
     Score,
 )
+from verdryx.pricing import ModelPrice, PriceBook
 from verdryx.store import Store
 
 __version__ = "0.1.0"
@@ -61,8 +62,10 @@ __all__ = [
     "GraderKind",
     "LLMAdapter",
     "LLMJudgeGrader",
+    "ModelPrice",
     "OutcomeCost",
     "OutcomeTagGrader",
+    "PriceBook",
     "RegexGrader",
     "Score",
     "Store",
@@ -72,5 +75,6 @@ __all__ = [
     "compute_drift",
     "cost_per_outcome",
     "load_records",
+    "read_parquet",
     "resolve_events_path",
 ]

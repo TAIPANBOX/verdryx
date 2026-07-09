@@ -145,12 +145,14 @@ class Score:
     """One case's grade within an EvalRun.
 
     cost_usd is threaded through end to end (here, the SQLite store, and
-    EvalRun's rollup properties) but the built-in adapters in graders.py
-    report token counts only, not dollar cost -- converting tokens to
-    dollars needs a per-model price table, which is out of scope for
-    Verdryx's MVP. Callers who already know the price (e.g. from a
-    tokenfuse export) can populate cost_usd directly when constructing
-    Score records themselves.
+    EvalRun's rollup properties). For GraderKind.LLM_JUDGE cases it is
+    populated from verdryx.pricing.PriceBook against the judge call's token
+    usage (see graders.py's LLMJudgeGrader and AnthropicAdapter). The other
+    three graders -- ExactGrader, RegexGrader, OutcomeTagGrader -- make no
+    model call, so their Scores keep cost_usd at 0.0: there is genuinely
+    nothing to price. Callers who already know the price from elsewhere
+    (e.g. a tokenfuse export) can still populate cost_usd directly when
+    constructing Score records themselves.
     """
 
     case_id: str

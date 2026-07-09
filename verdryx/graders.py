@@ -7,7 +7,8 @@ Four grader kinds, matching models.GraderKind:
 - OutcomeTagGrader: output is a tokenfuse ``x-fuse-outcome`` tag (not free
   text), mapped to a score through a configurable table.
 - LLMJudgeGrader: an injected LLMAdapter scores output 0..1 against
-  case.rubric.
+  case.rubric, and reports the judge call's dollar cost (see
+  ``verdryx.pricing.PriceBook``) alongside its token usage.
 
 Every grader implements the same shape, ``grade(case, output) -> GradeResult``
 (Protocol ``Grader`` below), so verdryx.cli's eval loop can dispatch to
@@ -27,6 +28,7 @@ import re
 from typing import Any, Protocol, runtime_checkable
 
 from verdryx.models import DEFAULT_OUTCOME_SCORES, EvalCase, GradeResult, GraderKind
+from verdryx.pricing import PriceBook
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +121,10 @@ class LLMAdapter(Protocol):
         evaluation. Not called for GraderKind.OUTCOME_TAG cases."""
         ...
 
-    def judge(self, prompt: str, output: str, rubric: str) -> tuple[float, int]:
-        """Return (score in [0, 1], tokens consumed) for LLMJudgeGrader."""
+    def judge(self, prompt: str, output: str, rubric: str) -> tuple[float, int, float]:
+        """Return (score in [0, 1], tokens consumed, cost in USD) for
+        LLMJudgeGrader. cost_usd is 0.0 for an adapter with no way to price
+        itself (e.g. StubLLMAdapter's default)."""
         ...
 
 
@@ -136,10 +140,12 @@ class StubLLMAdapter:
         completion: str = "stub output",
         judge_value: float = 1.0,
         tokens: int = 0,
+        cost_usd: float = 0.0,
     ) -> None:
         self.completion = completion
         self.judge_value = judge_value
         self.tokens = tokens
+        self.cost_usd = cost_usd
         self.completions: list[str] = []
         self.judgements: list[tuple[str, str, str]] = []
 
@@ -147,9 +153,9 @@ class StubLLMAdapter:
         self.completions.append(prompt)
         return self.completion, self.tokens
 
-    def judge(self, prompt: str, output: str, rubric: str) -> tuple[float, int]:
+    def judge(self, prompt: str, output: str, rubric: str) -> tuple[float, int, float]:
         self.judgements.append((prompt, output, rubric))
-        return self.judge_value, self.tokens
+        return self.judge_value, self.tokens, self.cost_usd
 
 
 _JUDGE_SYSTEM_PROMPT = (
@@ -205,7 +211,14 @@ def _anthropic_text(response: Any) -> str:
 
 
 class LLMJudgeGrader:
-    """Scores output 0..1 against case.rubric using an injected LLMAdapter."""
+    """Scores output 0..1 against case.rubric using an injected LLMAdapter.
+
+    cost_usd on the returned GradeResult is whatever the adapter's judge()
+    reports (0.0 for StubLLMAdapter unless a caller injects one; a real
+    PriceBook-derived figure for AnthropicAdapter) -- this grader trusts the
+    adapter's own accounting rather than pricing anything itself, since only
+    the adapter knows which model it called.
+    """
 
     def __init__(self, adapter: LLMAdapter) -> None:
         self.adapter = adapter
@@ -213,8 +226,8 @@ class LLMJudgeGrader:
     def grade(self, case: EvalCase, output: str) -> GradeResult:
         if not case.rubric:
             raise ValueError(f"LLMJudgeGrader requires case.rubric (case_id={case.id!r})")
-        value, tokens = self.adapter.judge(case.prompt, output, case.rubric)
-        return GradeResult(value=min(max(value, 0.0), 1.0), tokens=tokens)
+        value, tokens, cost_usd = self.adapter.judge(case.prompt, output, case.rubric)
+        return GradeResult(value=min(max(value, 0.0), 1.0), tokens=tokens, cost_usd=cost_usd)
 
 
 class AnthropicAdapter:
@@ -232,6 +245,11 @@ class AnthropicAdapter:
         base_url: Optional custom endpoint (e.g. a TokenFuse proxy URL).
         api_key: Explicit API key. When unset, the Anthropic SDK falls back
             to the ANTHROPIC_API_KEY environment variable itself.
+        price_book: Table used to price judge() calls. Defaults to
+            `PriceBook.default()` (TokenFuse's own default price book,
+            ported number-for-number; see verdryx.pricing). Inject a custom
+            one to price a model TokenFuse doesn't list, or to test pricing
+            without depending on the real table.
     """
 
     def __init__(
@@ -239,11 +257,13 @@ class AnthropicAdapter:
         model: str = "claude-haiku-4-5-20251001",
         base_url: str | None = None,
         api_key: str | None = None,
+        price_book: PriceBook | None = None,
     ) -> None:
         self.model_name = model
         self._base_url = base_url
         self._api_key = api_key
         self._client: Any = None
+        self._price_book = price_book if price_book is not None else PriceBook.default()
 
     def _get_client(self) -> Any:
         try:
@@ -272,7 +292,7 @@ class AnthropicAdapter:
         tokens = response.usage.input_tokens + response.usage.output_tokens
         return _anthropic_text(response), tokens
 
-    def judge(self, prompt: str, output: str, rubric: str) -> tuple[float, int]:
+    def judge(self, prompt: str, output: str, rubric: str) -> tuple[float, int, float]:
         client = self._get_client()
         response = client.messages.create(
             model=self.model_name,
@@ -281,8 +301,11 @@ class AnthropicAdapter:
             system=_JUDGE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": _build_judge_message(prompt, output, rubric)}],
         )
-        tokens = response.usage.input_tokens + response.usage.output_tokens
-        return _parse_judge_score(_anthropic_text(response)), tokens
+        input_tokens = response.usage.input_tokens
+        output_tokens = response.usage.output_tokens
+        cost_usd = self._price_book.price(self.model_name, input_tokens, output_tokens)
+        value = _parse_judge_score(_anthropic_text(response))
+        return value, input_tokens + output_tokens, cost_usd
 
 
 def build_graders(

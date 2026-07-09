@@ -7,7 +7,8 @@ Usage::
     verdryx baseline <run_id> [--db PATH] [--label LABEL]
     verdryx drift --baseline ID [--db PATH] [--window N] [--threshold F]
                    [--events PATH] [--agent-id ID]
-    verdryx cost-per-correct --input <ndjson-or-csv>
+    verdryx cost-per-correct --input <ndjson-or-csv-or-parquet>
+    verdryx cost-per-correct --traces <dir-of-parquet-segments>
     verdryx version
 
 `--model stub` (eval) selects StubLLMAdapter instead of a real Anthropic
@@ -230,10 +231,11 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
 
 
 def _cmd_cost_per_correct(args: argparse.Namespace, _config: Config) -> None:
-    records = load_records(args.input)
+    source = args.traces if args.traces else args.input
+    records = load_records(source)
     report = cost_per_outcome(records)
 
-    print(f"\nCost per outcome -- {args.input}\n")
+    print(f"\nCost per outcome -- {source}\n")
     print(f"  {'OUTCOME':<20} {'COUNT':>6} {'TOTAL':>12} {'MEAN':>10}")
     for outcome in sorted(report.by_outcome):
         row = report.by_outcome[outcome]
@@ -325,11 +327,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p_cost = sub.add_parser(
         "cost-per-correct", help="cost-per-outcome unit economics from an outcome+cost export"
     )
-    p_cost.add_argument(
+    p_cost_source = p_cost.add_mutually_exclusive_group(required=True)
+    p_cost_source.add_argument(
         "--input",
-        required=True,
         metavar="PATH",
-        help="NDJSON (.ndjson/.jsonl) or CSV (.csv) file of {outcome, cost_usd} records",
+        help=(
+            "NDJSON (.ndjson/.jsonl), CSV (.csv), or Parquet (.parquet) file of "
+            "{outcome, cost_usd} records"
+        ),
+    )
+    p_cost_source.add_argument(
+        "--traces",
+        metavar="DIR",
+        help="directory of tokenfuse Parquet trace segments (TOKENFUSE_DATA_DIR)",
     )
 
     sub.add_parser("version", help="print the verdryx version")
