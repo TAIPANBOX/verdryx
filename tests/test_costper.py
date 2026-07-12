@@ -255,6 +255,117 @@ def test_read_parquet_round_trip_through_cost_per_outcome(tmp_path, pyarrow_and_
     assert report.overall.total_cost_usd == pytest.approx(0.88)
 
 
+# ------------------------------------------------------------------
+# read_parquet -- multi-tagged-run reduction. Regression coverage for the
+# double-bucketing bug: previously read_parquet never read run_id/step, so a
+# run re-tagged partway through (e.g. escalated, then later case_resolved)
+# emitted one row PER tagged call instead of being reduced to its final
+# outcome, inflating both buckets for what is really a single resolved case.
+# Mirrors tokenfuse-core's own reduction (crates/core/src/outcomes.rs): the
+# LAST non-empty outcome tag per run_id, ordered by `step` (not ts_millis,
+# since a fast run can share a millisecond but never a step).
+# ------------------------------------------------------------------
+
+
+def test_read_parquet_reduces_multi_tagged_run_to_last_tag_by_step(
+    tmp_path, pyarrow_and_parquet
+) -> None:
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": ["r1", "r1"],
+            "step": [0, 1],
+            "outcome": ["escalated", "case_resolved"],
+            "cost_microusd": [500_000, 200_000],
+        }
+    )
+    path = tmp_path / "calls-00000000.parquet"
+    pq.write_table(table, path)
+
+    records = read_parquet(path)
+    assert records == [{"outcome": "case_resolved", "cost_usd": 0.70}]
+
+    report = cost_per_outcome(records)
+    assert report.escalated is None
+    assert report.resolved is not None
+    assert report.resolved.count == 1
+    assert report.resolved.total_cost_usd == pytest.approx(0.70)
+    assert report.overall.count == 1
+    assert report.overall.total_cost_usd == pytest.approx(0.70)
+
+
+def test_read_parquet_multi_tagged_run_orders_by_step_not_row_order(
+    tmp_path, pyarrow_and_parquet
+) -> None:
+    """The winning tag is picked by `step`, not by row order in the file --
+    here the step-1 (case_resolved) row is written FIRST, and step-0
+    (escalated) second, so a naive "last row wins" reduction would pick the
+    wrong tag."""
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": ["r1", "r1"],
+            "step": [1, 0],
+            "outcome": ["case_resolved", "escalated"],
+            "cost_microusd": [200_000, 500_000],
+        }
+    )
+    path = tmp_path / "calls-00000000.parquet"
+    pq.write_table(table, path)
+
+    assert read_parquet(path) == [{"outcome": "case_resolved", "cost_usd": 0.70}]
+
+
+def test_read_parquet_multiple_runs_reduced_independently(tmp_path, pyarrow_and_parquet) -> None:
+    """Reduction is per run_id -- a second, single-tagged run in the same
+    file must not be merged into the first run's multi-tagged reduction."""
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": ["r1", "r1", "r2"],
+            "step": [0, 1, 0],
+            "outcome": ["escalated", "case_resolved", "abandoned"],
+            "cost_microusd": [500_000, 200_000, 80_000],
+        }
+    )
+    path = tmp_path / "calls-00000000.parquet"
+    pq.write_table(table, path)
+
+    records = read_parquet(path)
+    assert {(r["outcome"], r["cost_usd"]) for r in records} == {
+        ("case_resolved", 0.70),
+        ("abandoned", 0.08),
+    }
+
+
+def test_read_parquet_reduces_a_run_split_across_multiple_files(
+    tmp_path, pyarrow_and_parquet
+) -> None:
+    """A run's calls can legitimately straddle a tokenfuse Parquet segment
+    rotation boundary -- reduction must operate across every file in the
+    directory combined, not per file independently."""
+    pa, pq = pyarrow_and_parquet
+    pq.write_table(
+        pa.table(
+            {"run_id": ["r1"], "step": [0], "outcome": ["escalated"], "cost_microusd": [500_000]}
+        ),
+        tmp_path / "calls-00000000.parquet",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "run_id": ["r1"],
+                "step": [1],
+                "outcome": ["case_resolved"],
+                "cost_microusd": [200_000],
+            }
+        ),
+        tmp_path / "calls-00000001.parquet",
+    )
+
+    assert read_parquet(tmp_path) == [{"outcome": "case_resolved", "cost_usd": 0.70}]
+
+
 def test_read_parquet_missing_pyarrow_raises_clear_import_error(tmp_path) -> None:
     """Same technique as test_graders.py's
     test_anthropic_adapter_import_error_without_sdk: `None` in sys.modules
