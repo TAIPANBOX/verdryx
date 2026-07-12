@@ -28,7 +28,7 @@ import sys
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
 
 from verdryx.config import Config
 from verdryx.costper import cost_per_outcome, load_records
@@ -49,7 +49,7 @@ from verdryx.store import Store
 # ------------------------------------------------------------------
 
 
-def _die(msg: str) -> None:
+def _die(msg: str) -> NoReturn:
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(1)
 
@@ -200,8 +200,14 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
             _die(f"no such baseline: {args.baseline!r}")
 
         baseline_run = store.load_run(baseline.eval_run_id)
-        model_filter = baseline_run.model if baseline_run is not None else None
-        recent = store.list_runs(model=model_filter, limit=args.window)
+        if baseline_run is None:
+            _die(
+                f"baseline {args.baseline!r} references eval run "
+                f"{baseline.eval_run_id!r}, which no longer exists in the store; "
+                "refusing to compare against an unfiltered pool of runs across "
+                "every model"
+            )
+        recent = store.list_runs(model=baseline_run.model, limit=args.window)
         if not recent:
             _die("no eval runs found to compare against the baseline")
 

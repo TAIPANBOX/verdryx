@@ -63,7 +63,20 @@ def migrate(conn: sqlite3.Connection) -> None:
 
 
 def _configure_connection(conn: sqlite3.Connection, path: str) -> None:
-    """Apply performance PRAGMAs, mirroring engram.core._configure_connection."""
+    """Apply performance PRAGMAs, mirroring engram.core._configure_connection.
+
+    Also turns on foreign-key enforcement (off by default per-connection in
+    SQLite): baselines.eval_run_id and scores.run_id both REFERENCE
+    eval_runs(id), so with this on, a baseline (or a score) can no longer be
+    inserted pointing at a run id that does not exist, and -- were a
+    delete/rename of an eval_runs row ever added -- it would be rejected
+    while a baseline still references it. Without this, a baseline whose
+    source run was never actually saved (e.g. a typo'd run id, or a
+    hand-edited database) silently turns verdryx.cli's `drift` command's
+    model filter into None, which then pools eval runs across every model
+    instead of just the baseline's own -- see `_cmd_drift`.
+    """
+    conn.execute("PRAGMA foreign_keys=ON")
     if path != ":memory:":
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")

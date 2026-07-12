@@ -8,6 +8,7 @@ StubLLMAdapter or `--model stub`, so this file makes no network call.
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
@@ -248,19 +249,73 @@ def test_drift_command_unknown_baseline_dies_cleanly(tmp_path, capsys) -> None:
     assert "no such baseline" in err
 
 
-def test_drift_command_no_matching_runs_dies_cleanly(tmp_path, capsys) -> None:
-    db = tmp_path / "store.db"
-    with Store.open(db) as store:
-        store.set_baseline(
-            Baseline(
-                id="b1", eval_run_id="no-such-run", mean_score=0.9, created_at=datetime.now(tz=UTC)
-            )
+def _insert_dangling_baseline(
+    db_path: object, baseline_id: str, eval_run_id: str, mean_score: float
+) -> None:
+    """Insert a Baseline row whose eval_run_id does not (or no longer) exist
+    in eval_runs, bypassing Store.set_baseline() -- which, now that
+    verdryx.store._configure_connection turns PRAGMA foreign_keys on,
+    refuses to create this state through the normal API. A raw sqlite3
+    connection defaults to foreign_keys OFF, so it can still write this row
+    directly, simulating a baseline that outlived its source run (e.g. a
+    hand-edited or pre-existing database file predating the FK pragma) --
+    exactly the state verdryx.cli._cmd_drift's own defensive check guards
+    against, independent of the FK pragma stopping *new* instances of it.
+    """
+    with Store.open(db_path):
+        pass  # create the schema, then close -- nothing to save yet.
+    raw = sqlite3.connect(str(db_path))
+    try:
+        raw.execute(
+            "INSERT INTO baselines (id, eval_run_id, mean_score, created_at, label) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (baseline_id, eval_run_id, mean_score, datetime.now(tz=UTC).isoformat(), ""),
         )
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_drift_command_baseline_with_missing_source_run_dies_cleanly(tmp_path, capsys) -> None:
+    """A baseline whose eval_run_id points at a run that isn't in the store
+    (never saved, or removed out of band) must die with a clear message
+    naming the problem, rather than silently falling through to an
+    unfiltered query across every model (see the dedicated regression test
+    below for the cross-model consequence of that fallback)."""
+    db = tmp_path / "store.db"
+    _insert_dangling_baseline(db, "b1", "no-such-run", 0.9)
+
     with pytest.raises(SystemExit) as exc_info:
         main(["drift", "--baseline", "b1", "--db", str(db)])
     assert exc_info.value.code == 1
     err = capsys.readouterr().err
-    assert "no eval runs found" in err
+    assert "no-such-run" in err
+
+
+def test_drift_command_dangling_baseline_never_pools_an_unrelated_model(
+    sample_evalset_path, tmp_path, capsys
+) -> None:
+    """Regression test for the drift-across-models bug: previously, when a
+    baseline's source eval run was gone, `baseline_run` came back None,
+    `model_filter` fell back to None, and `list_runs(model=None)` pooled
+    EVERY model -- so an unrelated-model run present in the store got
+    silently scored as a drift verdict instead of the command dying. Here an
+    artificially high baseline mean_score (1.5) stands in for "the baseline
+    this dangling row used to represent"; if the buggy fallback fires, the
+    unrelated `stub`-model run (mean_score 1.0) gets pooled in and produces a
+    bogus 'regressed' verdict with no warning at all."""
+    db = tmp_path / "store.db"
+    _insert_dangling_baseline(db, "dangling", "no-such-run", 1.5)
+
+    main(["eval", str(sample_evalset_path), "--model", "stub", "--db", str(db)])
+    capsys.readouterr()  # discard eval's own output
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["drift", "--baseline", "dangling", "--db", str(db)])
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "verdict" not in captured.out  # no cross-model verdict was ever printed
+    assert "no-such-run" in captured.err
 
 
 def test_baseline_command_unknown_run_dies_cleanly(tmp_path, capsys) -> None:
