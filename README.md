@@ -345,9 +345,10 @@ extra is optional: without it, the Parquet-reading tests skip themselves via
 Verdryx is one plane of the TAIPANBOX agent-governance stack, alongside
 [Engram](https://github.com/TAIPANBOX/engram) (memory), TokenFuse (spend
 governance), [Idryx](https://github.com/TAIPANBOX/idryx) (identity),
-[Qryx](https://github.com/TAIPANBOX/qryx) (cryptographic evidence), and
-[Wardryx](https://github.com/TAIPANBOX/wardryx) (policy decisions). Each
-product is complete alone; the stack shares one identifier format
+[Qryx](https://github.com/TAIPANBOX/qryx) (cryptographic evidence),
+[Wardryx](https://github.com/TAIPANBOX/wardryx) (policy decisions), and
+[Mockryx](https://github.com/TAIPANBOX/mockryx) (pre-production safety
+rehearsal). Each product is complete alone; the stack shares one identifier format
 (`agent://...`) and one event envelope, defined in the
 `TAIPANBOX/agent-passport` repo. Verdryx answers one question none of the
 others do: did the agent's output actually meet the bar, and is that bar
