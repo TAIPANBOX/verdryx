@@ -146,9 +146,10 @@ def test_outcome_tag_grader_default_mapping_is_a_copy_not_shared_reference() -> 
 
 def test_stub_llm_adapter_is_deterministic_and_records_calls() -> None:
     adapter = StubLLMAdapter(completion="fixed output", judge_value=0.75, tokens=12)
-    text, tokens = adapter.complete("some prompt")
+    text, tokens, cost_usd = adapter.complete("some prompt")
     assert text == "fixed output"
     assert tokens == 12
+    assert cost_usd == 0.0
     value, jtokens, jcost = adapter.judge("prompt", "output", "rubric")
     assert value == 0.75
     assert jtokens == 12
@@ -314,7 +315,7 @@ def test_anthropic_adapter_complete_extracts_text_and_tokens() -> None:
     )
     mock_client.messages.create.return_value = response
     with patch.object(adapter, "_get_client", return_value=mock_client):
-        text, tokens = adapter.complete("hi")
+        text, tokens, _cost_usd = adapter.complete("hi")
     assert text == "hello there"
     assert tokens == 8
 
@@ -419,6 +420,71 @@ def test_anthropic_adapter_judge_uses_injected_price_book() -> None:
     with patch.object(adapter, "_get_client", return_value=mock_client):
         _value, _tokens, cost_usd = adapter.judge("prompt", "output", "rubric")
     assert cost_usd == pytest.approx(1.0)
+
+
+# ------------------------------------------------------------------
+# AnthropicAdapter -- complete() cost_usd via PriceBook. Regression coverage
+# for the model-under-evaluation's own completion call never being priced:
+# only judge() reported a cost_usd, so Score.cost_usd for `verdryx eval
+# --model <real-model>` always undercounted the actual billed spend by
+# whatever the completion itself cost. complete() must price itself via the
+# same PriceBook it already holds, exactly like judge() does (mirrors the
+# three tests above one-for-one).
+# ------------------------------------------------------------------
+
+
+def test_anthropic_adapter_complete_prices_known_model_via_default_price_book() -> None:
+    """AnthropicAdapter()'s default model (claude-haiku-4-5-20251001) is an
+    exact PriceBook.default() entry: $1.00 / $5.00 per Mtok input/output."""
+    adapter = AnthropicAdapter()
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[SimpleNamespace(text="hello there")],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=1),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        _text, _tokens, cost_usd = adapter.complete("hi")
+    # 10 * 1.00/1e6 + 1 * 5.00/1e6 = 0.00001 + 0.000005 = 0.000015
+    assert cost_usd == pytest.approx(0.000015)
+
+
+def test_anthropic_adapter_complete_prices_unknown_model_via_conservative_fallback() -> None:
+    adapter = AnthropicAdapter(model="some-future-model-nobody-has-priced-yet")
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[SimpleNamespace(text="hello there")],
+        usage=SimpleNamespace(input_tokens=1_000_000, output_tokens=1_000_000),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        _text, _tokens, cost_usd = adapter.complete("hi")
+    # Fallback: $15.00 / $75.00 per Mtok -> 15 + 75 = 90 for 1M/1M tokens.
+    assert cost_usd == pytest.approx(90.0)
+
+
+def test_anthropic_adapter_complete_uses_injected_price_book() -> None:
+    custom_book = PriceBook().with_price("weird-model", ModelPrice(1.0, 1.0))
+    adapter = AnthropicAdapter(model="weird-model", price_book=custom_book)
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[SimpleNamespace(text="hello there")],
+        usage=SimpleNamespace(input_tokens=1_000_000, output_tokens=0),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        _text, _tokens, cost_usd = adapter.complete("hi")
+    assert cost_usd == pytest.approx(1.0)
+
+
+def test_stub_llm_adapter_complete_cost_usd_is_always_zero() -> None:
+    """StubLLMAdapter is for tests only, with no real billed call behind it
+    -- complete()'s cost_usd is hardcoded 0.0 regardless of the cost_usd
+    constructor arg (which feeds judge() only), unlike AnthropicAdapter's
+    complete() above, which really does price itself."""
+    adapter = StubLLMAdapter(tokens=100, cost_usd=5.0)
+    _text, _tokens, cost_usd = adapter.complete("prompt")
+    assert cost_usd == 0.0
 
 
 # ------------------------------------------------------------------

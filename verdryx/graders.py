@@ -116,9 +116,14 @@ class LLMAdapter(Protocol):
     conceptually the same pattern applied to a different capability.
     """
 
-    def complete(self, prompt: str) -> tuple[str, int]:
-        """Return (completion text, tokens consumed) for the model under
-        evaluation. Not called for GraderKind.OUTCOME_TAG cases."""
+    def complete(self, prompt: str) -> tuple[str, int, float]:
+        """Return (completion text, tokens consumed, cost in USD) for the
+        model under evaluation. Not called for GraderKind.OUTCOME_TAG cases.
+        cost_usd is 0.0 for an adapter with no way to price itself (e.g.
+        StubLLMAdapter's, always), mirroring judge()'s own cost_usd
+        contract below -- this is the model-under-evaluation's own billed
+        usage, not the judge's, and both need pricing for
+        EvalRun.total_cost_usd to reflect the run's real spend."""
         ...
 
     def judge(self, prompt: str, output: str, rubric: str) -> tuple[float, int, float]:
@@ -133,6 +138,11 @@ class StubLLMAdapter:
 
     Records every call it receives so tests can assert on what was asked,
     mirroring engram.llm.StubLLMAdapter's role in Engram's own test suite.
+
+    `cost_usd` only feeds `judge()`: `complete()` always reports 0.0,
+    since there is no real billed call behind this stub to price -- unlike
+    AnthropicAdapter, whose `complete()` really does price itself via a
+    PriceBook (see below).
     """
 
     def __init__(
@@ -149,9 +159,9 @@ class StubLLMAdapter:
         self.completions: list[str] = []
         self.judgements: list[tuple[str, str, str]] = []
 
-    def complete(self, prompt: str) -> tuple[str, int]:
+    def complete(self, prompt: str) -> tuple[str, int, float]:
         self.completions.append(prompt)
-        return self.completion, self.tokens
+        return self.completion, self.tokens, 0.0
 
     def judge(self, prompt: str, output: str, rubric: str) -> tuple[float, int, float]:
         self.judgements.append((prompt, output, rubric))
@@ -245,7 +255,8 @@ class AnthropicAdapter:
         base_url: Optional custom endpoint (e.g. a TokenFuse proxy URL).
         api_key: Explicit API key. When unset, the Anthropic SDK falls back
             to the ANTHROPIC_API_KEY environment variable itself.
-        price_book: Table used to price judge() calls. Defaults to
+        price_book: Table used to price both complete() (the model under
+            evaluation's own completion) and judge() calls. Defaults to
             `PriceBook.default()` (TokenFuse's own default price book,
             ported number-for-number; see verdryx.pricing). Inject a custom
             one to price a model TokenFuse doesn't list, or to test pricing
@@ -281,7 +292,7 @@ class AnthropicAdapter:
             self._client = anthropic.Anthropic(**kwargs)
         return self._client
 
-    def complete(self, prompt: str) -> tuple[str, int]:
+    def complete(self, prompt: str) -> tuple[str, int, float]:
         client = self._get_client()
         response = client.messages.create(
             model=self.model_name,
@@ -289,8 +300,10 @@ class AnthropicAdapter:
             temperature=0.0,
             messages=[{"role": "user", "content": prompt}],
         )
-        tokens = response.usage.input_tokens + response.usage.output_tokens
-        return _anthropic_text(response), tokens
+        input_tokens = response.usage.input_tokens
+        output_tokens = response.usage.output_tokens
+        cost_usd = self._price_book.price(self.model_name, input_tokens, output_tokens)
+        return _anthropic_text(response), input_tokens + output_tokens, cost_usd
 
     def judge(self, prompt: str, output: str, rubric: str) -> tuple[float, int, float]:
         client = self._get_client()

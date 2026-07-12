@@ -1,8 +1,11 @@
 """Tests for the Verdryx CLI (verdryx.cli).
 
 `run_eval` (the non-argparse core of the `eval` command) and `main()` (the
-full argparse-driven CLI) are both exercised here, always against
-StubLLMAdapter or `--model stub`, so this file makes no network call.
+full argparse-driven CLI) are both exercised here, almost always against
+StubLLMAdapter or `--model stub`, so this file makes no network call. The one
+exception (the completion-pricing regression test below) uses AnthropicAdapter
+with its `_get_client` patched out, the same network-free technique
+test_graders.py uses throughout.
 """
 
 from __future__ import annotations
@@ -10,12 +13,15 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from verdryx import __version__
 from verdryx.cli import main, run_eval
-from verdryx.graders import StubLLMAdapter
+from verdryx.graders import AnthropicAdapter, StubLLMAdapter
 from verdryx.models import Baseline, EvalCase, EvalSet, GraderKind
 from verdryx.store import Store
 
@@ -72,6 +78,34 @@ def test_run_eval_folds_completion_and_judge_tokens_into_one_score() -> None:
     # 5 tokens from complete() to produce the output + 5 from judge() to
     # grade it = 10.
     assert run.scores[0].tokens == 10
+
+
+def test_run_eval_prices_the_completion_not_just_the_judge() -> None:
+    """Regression test: previously Score.cost_usd only ever reflected an
+    LLM_JUDGE grader's own judge() cost (0.0 for every other grader kind) --
+    the model-under-evaluation's own completion call, real billed LLM usage
+    for `verdryx eval --model <real-model>`, was never priced anywhere at
+    all. This case uses GraderKind.EXACT (no judge involved whatsoever, so
+    ExactGrader's own GradeResult.cost_usd is always 0.0), which makes any
+    nonzero Score.cost_usd unambiguously attributable to the completion
+    call. AnthropicAdapter's network client is mocked, mirroring
+    test_graders.py's own technique -- no real call is made."""
+    evalset = EvalSet(id="s", cases=[EvalCase(id="c1", prompt="say hi", expected="hello there")])
+    adapter = AnthropicAdapter()  # default model: claude-haiku-4-5-20251001
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[SimpleNamespace(text="hello there")],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=1),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        run = run_eval(evalset, adapter, model="claude-haiku-4-5-20251001")
+
+    assert run.scores[0].value == 1.0  # exact match, sanity check on grading itself
+    # 10 * $1.00/Mtok + 1 * $5.00/Mtok = 0.00001 + 0.000005 = 0.000015
+    assert run.scores[0].cost_usd == pytest.approx(0.000015)
+    assert run.scores[0].cost_usd > 0
+    assert run.total_cost_usd == pytest.approx(0.000015)
 
 
 # ------------------------------------------------------------------
@@ -250,7 +284,7 @@ def test_drift_command_unknown_baseline_dies_cleanly(tmp_path, capsys) -> None:
 
 
 def _insert_dangling_baseline(
-    db_path: object, baseline_id: str, eval_run_id: str, mean_score: float
+    db_path: Path, baseline_id: str, eval_run_id: str, mean_score: float
 ) -> None:
     """Insert a Baseline row whose eval_run_id does not (or no longer) exist
     in eval_runs, bypassing Store.set_baseline() -- which, now that

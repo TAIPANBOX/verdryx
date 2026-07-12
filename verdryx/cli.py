@@ -89,7 +89,12 @@ def run_eval(
     For GraderKind.OUTCOME_TAG cases, case.prompt is treated as the raw
     outcome tag to grade (no model call: see EvalCase's docstring in
     models.py). Every other case calls adapter.complete(case.prompt) first
-    to produce the output that gets graded.
+    to produce the output that gets graded; that call's own cost_usd (real,
+    billed usage for the model under evaluation, priced by AnthropicAdapter
+    via the same PriceBook judge() uses -- see graders.py) is folded into
+    Score.cost_usd alongside whatever the grader itself reports, so
+    EvalRun.total_cost_usd reflects the run's full spend, not just an
+    LLM_JUDGE grader's judge-call cost.
     """
     graders = graders if graders is not None else build_graders(judge_adapter=adapter)
     run_id = str(uuid.uuid4())
@@ -103,16 +108,16 @@ def run_eval(
                 f"no grader configured for kind {case.grader.value!r} (case_id={case.id!r})"
             )
         if case.grader == GraderKind.OUTCOME_TAG:
-            output, completion_tokens = case.prompt, 0
+            output, completion_tokens, completion_cost_usd = case.prompt, 0, 0.0
         else:
-            output, completion_tokens = adapter.complete(case.prompt)
+            output, completion_tokens, completion_cost_usd = adapter.complete(case.prompt)
         result = grader.grade(case, output)
         scores.append(
             Score(
                 case_id=case.id,
                 value=result.value,
                 tokens=completion_tokens + result.tokens,
-                cost_usd=result.cost_usd,
+                cost_usd=completion_cost_usd + result.cost_usd,
             )
         )
 
