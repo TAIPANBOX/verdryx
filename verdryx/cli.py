@@ -32,7 +32,7 @@ from typing import Any, NoReturn
 
 from verdryx.config import Config
 from verdryx.costper import cost_per_outcome, load_records
-from verdryx.drift import DEFAULT_THRESHOLD, compute_drift
+from verdryx.drift import DEFAULT_CONFIDENCE, DEFAULT_THRESHOLD, compute_drift
 from verdryx.events import EventLog, resolve_events_path
 from verdryx.graders import (
     AnthropicAdapter,
@@ -216,12 +216,20 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
         if not recent:
             _die("no eval runs found to compare against the baseline")
 
-        report = compute_drift(recent, baseline, threshold=args.threshold)
+        report = compute_drift(
+            recent, baseline, threshold=args.threshold, baseline_run=baseline_run
+        )
 
     print(f"\nDrift vs baseline {report.baseline_id}  (window={report.window})\n")
     print(f"  mean score: {report.mean_score:.3f}")
     print(f"  baseline:   {baseline.mean_score:.3f}")
     print(f"  delta:      {report.delta:+.3f}")
+    if report.baseline_n:
+        t_display = f"{report.t_statistic:.2f}" if report.t_statistic is not None else "n/a"
+        print(f"  t-statistic: {t_display}  (n={report.baseline_n} baseline cases)")
+        print(
+            f"  {DEFAULT_CONFIDENCE:.0%} CI on delta: [{report.ci_low:+.3f}, {report.ci_high:+.3f}]"
+        )
     print(f"  verdict:    {report.verdict}\n")
 
     if report.verdict == "regressed":
@@ -236,6 +244,10 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
                     "mean_score": report.mean_score,
                     "delta": report.delta,
                     "verdict": report.verdict,
+                    "baseline_n": report.baseline_n,
+                    "t_statistic": report.t_statistic,
+                    "ci_low": report.ci_low,
+                    "ci_high": report.ci_high,
                 },
                 run_id=recent[-1].id,
             )

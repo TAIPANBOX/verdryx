@@ -144,13 +144,23 @@ runs), then compares that pooled mean to `baseline.mean_score`:
 - `delta = mean_score - baseline.mean_score`
 - `verdict = "regressed"` if `delta <= -threshold`, else `"on-track"`
 
+That flat threshold is always sufficient on its own to trip the verdict, and
+never goes away. When the caller also passes `baseline_run` (the baseline's
+original `EvalRun`, with its per-case scores), `compute_drift` additionally
+runs a two-sample significance check between those scores and the recent
+pooled ones: a Welch's t-statistic (informational) plus a bootstrap
+confidence interval on the delta. If that interval's upper bound stays below
+zero, the verdict is `"regressed"` too, even when the drop is smaller than
+`threshold` -- catching a small but consistent regression a flat threshold
+sized to filter noise would otherwise miss.
+
 `verdryx drift --baseline ID --window N` fetches the baseline, filters
 stored runs to the same model, takes the `N` most recent, and prints the
-report. On `regressed`, and only then, it emits a `quality_drift` event
-(severity `high`) if an event log is configured; `on-track` checks are not
-reported as events. This is a flat threshold, not a significance test: no
-p-values or confidence intervals in this MVP. A statistically-aware verdict
-is a documented later enhancement.
+report -- including the t-statistic and confidence interval whenever the
+baseline run has at least two scores to compare against (it already loads
+that run to filter by model, so this is free). On `regressed`, and only
+then, it emits a `quality_drift` event (severity `high`) if an event log is
+configured; `on-track` checks are not reported as events.
 
 ---
 
@@ -244,7 +254,7 @@ Agent Passport envelope (`taipanbox.dev/agent-event/v0.2`, see the
 |---|---|---|
 | `eval_run` | info | `model`, `cases`, `mean_score`, `total_tokens`, `total_cost_usd` |
 | `quality_score` | info | `case_id`, `value`, `tokens`, `cost_usd` |
-| `quality_drift` | high | `baseline_id`, `window`, `mean_score`, `delta`, `verdict` |
+| `quality_drift` | high | `baseline_id`, `window`, `mean_score`, `delta`, `verdict`, `baseline_n`, `t_statistic`, `ci_low`, `ci_high` |
 
 Same rules as Engram's exporter: **opt-in** (no file, no thread, no
 allocation unless a path is configured), **fail-open** (a write failure is
@@ -375,11 +385,11 @@ slipping?
 - [x] Four graders: `ExactGrader`, `RegexGrader`, `OutcomeTagGrader`, `LLMJudgeGrader`
 - [x] `StubLLMAdapter` (deterministic, offline, used by CI) and `AnthropicAdapter` (real Messages API, `base_url` proxy support, prompt-injection-resistant judge wrapping)
 - [x] Judge call pricing: `verdryx.pricing.PriceBook`, a dependency-free port of TokenFuse's default price book, populates `Score.cost_usd` for `llm_judge` cases
-- [x] Baselines and drift: `compute_drift`, flat-threshold `on-track`/`regressed` verdict, `verdryx drift` CLI
+- [x] Baselines and drift: `compute_drift`, flat-threshold `on-track`/`regressed` verdict plus a Welch's-t/bootstrap-CI significance check, `verdryx drift` CLI
 - [x] Cost per outcome: `cost_per_outcome`, NDJSON/CSV/Parquet loaders, `verdryx cost-per-correct --input`/`--traces`
 - [x] Opt-in NDJSON event log: `eval_run`, `quality_score`, `quality_drift` events on the shared Agent Passport envelope; opt-in, fail-open, empty-`agent_id` events skipped and counted
 - [x] Configuration via `verdryx.config.Config`, CLI flags override environment
-- [ ] Statistically-aware drift verdict (confidence intervals / significance testing) beyond the flat threshold
+- [x] Statistically-aware drift verdict (confidence intervals / significance testing) beyond the flat threshold
 - [x] Reproduce tokenfuse-core's "last non-empty outcome tag per run wins" aggregation inside `read_parquet` (`_reduce_tagged_rows`, ordered by `run_id`/`step`)
 - [ ] Fold untagged-row cost and Breaker-blocked-call exclusion into that same `read_parquet` aggregation, to fully match tokenfuse-core's `compute_outcomes` (untagged rows are still dropped pre-reduction; no `decision` column read yet)
 - [ ] OTLP exporter wired up to `VERDRYX_OTLP_ENDPOINT` (config field exists, nothing consumes it yet)

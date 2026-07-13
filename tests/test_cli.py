@@ -211,6 +211,34 @@ def test_baseline_and_drift_commands_end_to_end(sample_evalset_path, tmp_path, c
     assert "verdict:    on-track" in out
 
 
+def test_drift_command_prints_significance_fields_when_baseline_run_has_enough_scores(
+    sample_evalset_path, sample_evalset, tmp_path, capsys
+) -> None:
+    # _cmd_drift already loads the baseline's own run to filter recent runs
+    # by model; this pins that it's actually threaded into compute_drift
+    # (not just used for the model filter), so the CLI prints the
+    # significance block instead of silently dropping it.
+    db = tmp_path / "store.db"
+    main(["eval", str(sample_evalset_path), "--model", "stub", "--db", str(db)])
+    capsys.readouterr()
+
+    with Store.open(db) as store:
+        run_id = store.list_runs()[0].id
+    main(["baseline", run_id, "--db", str(db)])
+    capsys.readouterr()
+    with Store.open(db) as store:
+        baseline_id = store.list_baselines()[0].id
+
+    main(["eval", str(sample_evalset_path), "--model", "stub", "--db", str(db)])
+    capsys.readouterr()
+
+    main(["drift", "--baseline", baseline_id, "--db", str(db)])
+    out = capsys.readouterr().out
+    assert f"n={len(sample_evalset.cases)} baseline cases" in out
+    assert "CI on delta:" in out
+    assert "t-statistic:" in out
+
+
 def test_drift_command_regressed_emits_quality_drift_event(
     sample_evalset_path, tmp_path, agent_id
 ) -> None:

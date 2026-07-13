@@ -163,6 +163,11 @@ def test_drift_report_construction() -> None:
     )
     assert report.verdict == "regressed"
     assert report.window == 3
+    # Significance fields default to "not computed", not zero/false.
+    assert report.baseline_n == 0
+    assert report.t_statistic is None
+    assert report.ci_low is None
+    assert report.ci_high is None
 
 
 # ------------------------------------------------------------------

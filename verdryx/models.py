@@ -214,7 +214,23 @@ class DriftReport:
         delta: mean_score - baseline.mean_score. Negative means the
             windowed runs scored lower than the baseline.
         verdict: "regressed" if delta dropped at or past the configured
-            threshold, "on-track" otherwise. See verdryx.drift.
+            threshold, OR if the significance check below flags it,
+            "on-track" otherwise. See verdryx.drift.
+        baseline_n: Number of individual case scores the significance check
+            was run against, reloaded from the baseline's original eval run.
+            0 when that run's scores were not supplied to compute_drift (the
+            comparison then falls back to the flat threshold alone).
+        t_statistic: Welch's t-statistic for recent scores vs. the
+            baseline run's scores, or None when baseline_n is 0 or either
+            sample has fewer than 2 values (variance undefined).
+            Informational: the verdict itself is driven by ci_low/ci_high,
+            not this value.
+        ci_low: Lower bound of the bootstrap confidence interval on delta
+            (recent mean - baseline mean), or None when baseline_n is 0.
+        ci_high: Upper bound of that interval, or None. When ci_high < 0,
+            the drop is significant at the configured confidence level even
+            if it is smaller than `threshold`, and the verdict reflects
+            that.
     """
 
     baseline_id: str
@@ -222,6 +238,10 @@ class DriftReport:
     mean_score: float
     delta: float
     verdict: Literal["on-track", "regressed"]
+    baseline_n: int = 0
+    t_statistic: float | None = None
+    ci_low: float | None = None
+    ci_high: float | None = None
 
 
 @dataclass

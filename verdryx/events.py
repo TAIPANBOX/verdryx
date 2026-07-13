@@ -46,8 +46,15 @@ type                   severity  data
 eval_run               info      run_id, model, cases, mean_score, total_tokens,
                                   total_cost_usd
 quality_score          info      case_id, value, tokens, cost_usd
-quality_drift          high      baseline_id, window, mean_score, delta, verdict
+quality_drift          high      baseline_id, window, mean_score, delta, verdict,
+                                  baseline_n, t_statistic, ci_low, ci_high
 =====================  ========  ==============================================
+
+``baseline_n``/``t_statistic``/``ci_low``/``ci_high`` come from
+:func:`verdryx.drift.compute_drift`'s optional two-sample significance
+check (Welch's t-statistic plus a bootstrap confidence interval on the
+delta). They are ``0``/``None``/``None``/``None`` when that check did not
+run (fewer than 2 scores in either the baseline run or the recent window).
 
 No ``prev_hash``
 -----------------
