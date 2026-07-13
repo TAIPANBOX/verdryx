@@ -182,13 +182,16 @@ all of them in one CLI command.
 `read_parquet` (requires the `traces` extra: `pip install -e '.[traces]'`)
 reads tokenfuse's `outcome` and `cost_microusd` trace columns directly
 (`tokenfuse`'s `crates/gateway/src/sink.rs`), converting microdollars to
-`cost_usd` and dropping untagged rows (most rows in a raw trace: tokenfuse
-expects only a run's final call to carry the outcome tag). It does not
-reproduce tokenfuse-core's full "last non-empty outcome tag per run wins"
-aggregation (`tokenfuse`'s `crates/core/src/outcomes.rs`); that still
-happens upstream, e.g. via `tokenfuse outcomes --json`, for a run whose
-agent tags more than one of its calls. Reproducing that reduction inside
-Verdryx itself remains a documented later enhancement.
+`cost_usd`. Runs with more than one tagged call are reduced the same way
+tokenfuse-core does it (`crates/core/src/outcomes.rs`'s `compute_outcomes`):
+rows are ordered by `(run_id, step)`, the last non-empty outcome tag per
+run wins, and that run's cost is summed into the winning bucket
+(`_reduce_tagged_rows`). Rows with no `run_id` column are kept as
+independent per-call records, for backward compatibility with trace files
+that predate it. Untagged rows are still dropped before reduction instead
+of folding their cost into the run's winning bucket, and there is no
+`decision`-column read yet to exclude Breaker-blocked calls the way
+`is_blocked_decision()` does upstream - both remain open follow-ups.
 
 ---
 
@@ -377,7 +380,8 @@ slipping?
 - [x] Opt-in NDJSON event log: `eval_run`, `quality_score`, `quality_drift` events on the shared Agent Passport envelope; opt-in, fail-open, empty-`agent_id` events skipped and counted
 - [x] Configuration via `verdryx.config.Config`, CLI flags override environment
 - [ ] Statistically-aware drift verdict (confidence intervals / significance testing) beyond the flat threshold
-- [ ] Reproduce tokenfuse-core's "last non-empty outcome tag per run wins" aggregation inside `read_parquet` (currently one record per traced call, not per resolved run)
+- [x] Reproduce tokenfuse-core's "last non-empty outcome tag per run wins" aggregation inside `read_parquet` (`_reduce_tagged_rows`, ordered by `run_id`/`step`)
+- [ ] Fold untagged-row cost and Breaker-blocked-call exclusion into that same `read_parquet` aggregation, to fully match tokenfuse-core's `compute_outcomes` (untagged rows are still dropped pre-reduction; no `decision` column read yet)
 - [ ] OTLP exporter wired up to `VERDRYX_OTLP_ENDPOINT` (config field exists, nothing consumes it yet)
 
 ## License
