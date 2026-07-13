@@ -18,10 +18,11 @@ contacted. The "no network calls at write time" invariant exists so Verdryx
 stays usable fully offline and so write latency stays bounded by local disk
 I/O rather than a remote service's availability; a local NDJSON append
 preserves both properties exactly as writing to the SQLite store itself
-does. If a future backend wants to ship these events over the network, that
+does. If a backend wants to ship these events over the network, that
 belongs in a separate consumer process that tails the file, never in this
-module. (VERDRYX_OTLP_ENDPOINT in verdryx.config is read for exactly that
-future consumer; this module does not use it.)
+module. (VERDRYX_OTLP_ENDPOINT / verdryx.otel is exactly that separate
+consumer for a related but distinct purpose -- OTLP tracing, not the
+agent-event bus; this module does not use it.)
 
 Opt-in only
 -----------

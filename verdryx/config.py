@@ -31,9 +31,11 @@ class Config:
         db_path: SQLite store path.
         events_path: Opt-in NDJSON event log path, or None if unset (events
             are then fully disabled; see verdryx.events).
-        otlp_endpoint: Read into config for a future OTLP exporter. Not
-            wired up to anything yet in this MVP -- verdryx.events writes
-            NDJSON only. Documented later enhancement.
+        otlp_endpoint: Collector base URL for verdryx.otel.OTLPExporter, a
+            span per eval run / drift check. Independent of events_path:
+            OTLP tracing and the NDJSON agent-event log are separate,
+            optional sinks with different purposes (see verdryx.otel's
+            module docstring), either or both may be enabled.
         anthropic_api_key: Explicit Anthropic API key for the real
             LLMJudgeGrader adapter. When None, the Anthropic SDK falls back
             to its own ANTHROPIC_API_KEY lookup.

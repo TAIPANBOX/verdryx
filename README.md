@@ -88,6 +88,7 @@ asks for without special-casing.
 | **Baselines and drift** | `verdryx/drift.py`: snapshot an `EvalRun`'s mean score as a `Baseline`, then compare a window of later runs against it |
 | **Cost per outcome** | `verdryx/costper.py`: given a flat export of `{outcome, cost_usd}` records, computes cost-per-resolved-case, cost-per-escalated, cost-per-abandoned, and overall |
 | **Opt-in event log** | `verdryx/events.py`: an NDJSON writer for the shared TAIPANBOX Agent Passport event envelope (schema `taipanbox.dev/agent-event/v0.2`, `source: "verdryx"`), so `eval_run`, `quality_score`, and `quality_drift` events reach the rest of the governance stack |
+| **Opt-in OTLP export** | `verdryx/otel.py`: a hand-rolled OTLP/HTTP-JSON span per `eval`/`drift` run to `VERDRYX_OTLP_ENDPOINT`, so a trace collector (Grafana/Datadog/Honeycomb) sees eval/drift activity regardless of verdict |
 
 ---
 
@@ -275,6 +276,34 @@ which agent's output is being measured.
 
 ---
 
+## OTLP export
+
+Disabled by default. Set `VERDRYX_OTLP_ENDPOINT` to a collector base URL
+(e.g. `http://localhost:4318`) to turn it on. `eval` and `drift` each
+export one OTLP/HTTP-JSON span, posted to `<endpoint>/v1/traces`, hand-
+rolled against the wire format directly (`verdryx/otel.py`, stdlib
+`urllib` only -- no OpenTelemetry SDK dependency), mirroring Wardryx's own
+exporter. Every span for one eval run shares a trace id derived from its
+`run_id`, so an `eval_run` span and a later `quality_drift` check against
+the same run group together in the collector's UI.
+
+Unlike the NDJSON event log above, a span is exported for **every**
+`eval`/`drift` run regardless of verdict -- tracing is for observability of
+what ran and when, not governance alerting, so an unremarkable "on-track"
+drift check is exactly as trace-worthy as a regression.
+
+Verdryx's `eval`/`drift` commands are one-shot CLI invocations, not a
+long-lived server the way Wardryx is: the process exits as soon as the
+command handler returns, and a fire-and-forget background thread does not
+survive its process exiting. `OTLPExporter.wait()` joins any in-flight
+export before the command handler returns, so the process's own printed
+output is never delayed, but the process itself does not exit until
+delivery has been attempted -- without it, a span would be silently killed
+mid-POST essentially every time, a real bug a live end-to-end CLI run
+against an actual local collector caught (not just a theoretical concern).
+
+---
+
 ## Configuration
 
 Read once, at process start, into `verdryx.config.Config`:
@@ -283,7 +312,7 @@ Read once, at process start, into `verdryx.config.Config`:
 |---|---|
 | `VERDRYX_DB` | Default SQLite store path (default: `verdryx.db`) |
 | `VERDRYX_EVENTS_PATH` | Default NDJSON event log path (default: unset, events disabled) |
-| `VERDRYX_OTLP_ENDPOINT` | Read into config for a future OTLP exporter; not wired up to anything yet |
+| `VERDRYX_OTLP_ENDPOINT` | OTLP/HTTP collector base URL; one span per `eval`/`drift` run (default: unset, OTLP export disabled) |
 | `ANTHROPIC_API_KEY` | API key for the real `AnthropicAdapter` |
 | `ANTHROPIC_BASE_URL` | Proxy endpoint (e.g. TokenFuse) for the real `AnthropicAdapter` |
 
@@ -400,7 +429,7 @@ slipping?
 - [x] Configuration via `verdryx.config.Config`, CLI flags override environment
 - [x] Statistically-aware drift verdict (confidence intervals / significance testing) beyond the flat threshold
 - [x] Reproduce tokenfuse-core's `compute_outcomes` aggregation inside `read_parquet` (`_reduce_call_rows`): last non-empty outcome tag per run wins (ordered by `run_id`/`step`), every call's cost folds into its run's bucket, a never-tagged run reports under `UNTAGGED`, and a Breaker-blocked call is counted but excluded from cost
-- [ ] OTLP exporter wired up to `VERDRYX_OTLP_ENDPOINT` (config field exists, nothing consumes it yet)
+- [x] OTLP exporter (`verdryx.otel`): a span per `eval`/`drift` run to `VERDRYX_OTLP_ENDPOINT`, hand-rolled OTLP/HTTP-JSON (stdlib `urllib`, no OTel SDK), mirroring Wardryx's own exporter; unlike a long-lived server, a one-shot CLI process must join its background export thread before exiting (`OTLPExporter.wait`) or the span is silently dropped almost every time -- caught by a live end-to-end run against a real local collector, not just reasoned about
 
 ## License
 

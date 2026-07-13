@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -42,6 +43,7 @@ from verdryx.graders import (
     build_graders,
 )
 from verdryx.models import Baseline, EvalRun, EvalSet, GraderKind, Score
+from verdryx.otel import OTLPExporter, Span
 from verdryx.store import Store
 
 # ------------------------------------------------------------------
@@ -69,6 +71,10 @@ def _build_adapter(model: str, config: Config) -> LLMAdapter:
 def _events_from_args(events_arg: str | None) -> EventLog | None:
     path = resolve_events_path(events_arg)
     return EventLog(path) if path is not None else None
+
+
+def _otlp_from_config(config: Config) -> OTLPExporter | None:
+    return OTLPExporter(config.otlp_endpoint) if config.otlp_endpoint else None
 
 
 # ------------------------------------------------------------------
@@ -168,15 +174,41 @@ def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
             run_id=run.id,
         )
 
-    print(f"\nEval run {run.id}  (model={run.model}, db={db_path})\n")
-    if not run.scores:
-        print("  (no cases)\n")
-        return
-    for score in run.scores:
-        print(f"  [{score.value:.2f}] {score.case_id}")
-    print(
-        f"\n  mean score: {run.mean_score:.3f}   cases: {len(run.scores)}   tokens: {run.total_tokens}\n"
-    )
+    otlp = _otlp_from_config(config)
+    if otlp is not None:
+        otlp.export(
+            Span(
+                name="eval_run",
+                run_id=run.id,
+                agent_id=args.agent_id,
+                attributes={
+                    "model": run.model,
+                    "cases": len(run.scores),
+                    "mean_score": run.mean_score,
+                    "total_tokens": run.total_tokens,
+                    "total_cost_usd": run.total_cost_usd,
+                },
+                timestamp_ns=time.time_ns(),
+            )
+        )
+
+    try:
+        print(f"\nEval run {run.id}  (model={run.model}, db={db_path})\n")
+        if not run.scores:
+            print("  (no cases)\n")
+            return
+        for score in run.scores:
+            print(f"  [{score.value:.2f}] {score.case_id}")
+        print(
+            f"\n  mean score: {run.mean_score:.3f}   cases: {len(run.scores)}   tokens: {run.total_tokens}\n"
+        )
+    finally:
+        # A one-shot CLI process exits as soon as this handler returns, on
+        # every path including the early return above -- an exported span
+        # not yet joined here would be silently killed mid-flight along
+        # with its daemon thread. See verdryx.otel's module docstring.
+        if otlp is not None:
+            otlp.wait()
 
 
 def _cmd_baseline(args: argparse.Namespace, config: Config) -> None:
@@ -251,6 +283,36 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
                 },
                 run_id=recent[-1].id,
             )
+
+    # Exported for every check regardless of verdict, unlike the governance-
+    # alert quality_drift event above: a trace collector needs the full
+    # on-track/regressed activity pattern, not just the regressions.
+    otlp = _otlp_from_config(config)
+    if otlp is not None:
+        otlp.export(
+            Span(
+                name="quality_drift",
+                run_id=recent[-1].id,
+                agent_id=args.agent_id,
+                attributes={
+                    "baseline_id": report.baseline_id,
+                    "window": report.window,
+                    "mean_score": report.mean_score,
+                    "delta": report.delta,
+                    "verdict": report.verdict,
+                    "baseline_n": report.baseline_n,
+                    "t_statistic": report.t_statistic,
+                    "ci_low": report.ci_low,
+                    "ci_high": report.ci_high,
+                },
+                timestamp_ns=time.time_ns(),
+            )
+        )
+        # A one-shot CLI process exits as soon as this handler returns; an
+        # exported span not yet joined here would be silently killed mid-
+        # flight along with its daemon thread. See verdryx.otel's module
+        # docstring.
+        otlp.wait()
 
 
 def _cmd_cost_per_correct(args: argparse.Namespace, _config: Config) -> None:
