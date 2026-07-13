@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from typing import Any, NoReturn
 
 from verdryx.config import Config
-from verdryx.costper import cost_per_outcome, load_records
+from verdryx.costper import UNTAGGED, cost_per_outcome, load_records
 from verdryx.drift import DEFAULT_CONFIDENCE, DEFAULT_THRESHOLD, compute_drift
 from verdryx.events import EventLog, resolve_events_path
 from verdryx.graders import (
@@ -260,7 +260,10 @@ def _cmd_cost_per_correct(args: argparse.Namespace, _config: Config) -> None:
 
     print(f"\nCost per outcome -- {source}\n")
     print(f"  {'OUTCOME':<20} {'COUNT':>6} {'TOTAL':>12} {'MEAN':>10}")
-    for outcome in sorted(report.by_outcome):
+    # Alphabetical, but UNTAGGED always last -- matches tokenfuse-core's own
+    # compute_outcomes row order (a real outcome tag before "(untagged)",
+    # which would otherwise sort first on its leading "(").
+    for outcome in sorted(report.by_outcome, key=lambda o: (o == UNTAGGED, o)):
         row = report.by_outcome[outcome]
         print(
             f"  {row.outcome:<20} {row.count:>6} ${row.total_cost_usd:>10.2f} ${row.mean_cost_usd:>8.4f}"

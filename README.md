@@ -190,18 +190,27 @@ file, or a directory of `.parquet` files, and dispatches automatically;
 all of them in one CLI command.
 
 `read_parquet` (requires the `traces` extra: `pip install -e '.[traces]'`)
-reads tokenfuse's `outcome` and `cost_microusd` trace columns directly
-(`tokenfuse`'s `crates/gateway/src/sink.rs`), converting microdollars to
-`cost_usd`. Runs with more than one tagged call are reduced the same way
-tokenfuse-core does it (`crates/core/src/outcomes.rs`'s `compute_outcomes`):
-rows are ordered by `(run_id, step)`, the last non-empty outcome tag per
-run wins, and that run's cost is summed into the winning bucket
-(`_reduce_tagged_rows`). Rows with no `run_id` column are kept as
-independent per-call records, for backward compatibility with trace files
-that predate it. Untagged rows are still dropped before reduction instead
-of folding their cost into the run's winning bucket, and there is no
-`decision`-column read yet to exclude Breaker-blocked calls the way
-`is_blocked_decision()` does upstream - both remain open follow-ups.
+reads tokenfuse's `outcome`, `cost_microusd`, `run_id`, `step`, and
+`decision` trace columns directly (`tokenfuse`'s `crates/gateway/src/sink.rs`),
+converting microdollars to `cost_usd`, and reduces a `run_id`-bearing trace
+the same way tokenfuse-core does it
+(`crates/core/src/outcomes.rs`'s `compute_outcomes`):
+
+- Rows are ordered by `(run_id, step)`; the last non-empty outcome tag per
+  run wins (`_reduce_call_rows`).
+- Every call belonging to a run folds into that run's bucket, not only its
+  tagged calls -- an untagged intermediate call's cost is not dropped, and
+  a run that is never tagged at all still produces a record, under the
+  `UNTAGGED` (`"(untagged)"`) label, rather than vanishing from the report.
+- A Breaker-blocked call (`decision` one of tokenfuse's seven block
+  reasons, mirroring `is_blocked_decision()`) is still counted, but
+  excluded from cost -- its `cost_microusd` is an avoided estimate, never a
+  real settled charge.
+
+Rows with no `run_id` column at all are kept as independent per-call
+records, for backward compatibility with trace files that predate it: an
+untagged row then has no run to fold into and is dropped, same as before
+this reduction existed.
 
 ---
 
@@ -390,8 +399,7 @@ slipping?
 - [x] Opt-in NDJSON event log: `eval_run`, `quality_score`, `quality_drift` events on the shared Agent Passport envelope; opt-in, fail-open, empty-`agent_id` events skipped and counted
 - [x] Configuration via `verdryx.config.Config`, CLI flags override environment
 - [x] Statistically-aware drift verdict (confidence intervals / significance testing) beyond the flat threshold
-- [x] Reproduce tokenfuse-core's "last non-empty outcome tag per run wins" aggregation inside `read_parquet` (`_reduce_tagged_rows`, ordered by `run_id`/`step`)
-- [ ] Fold untagged-row cost and Breaker-blocked-call exclusion into that same `read_parquet` aggregation, to fully match tokenfuse-core's `compute_outcomes` (untagged rows are still dropped pre-reduction; no `decision` column read yet)
+- [x] Reproduce tokenfuse-core's `compute_outcomes` aggregation inside `read_parquet` (`_reduce_call_rows`): last non-empty outcome tag per run wins (ordered by `run_id`/`step`), every call's cost folds into its run's bucket, a never-tagged run reports under `UNTAGGED`, and a Breaker-blocked call is counted but excluded from cost
 - [ ] OTLP exporter wired up to `VERDRYX_OTLP_ENDPOINT` (config field exists, nothing consumes it yet)
 
 ## License

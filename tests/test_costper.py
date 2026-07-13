@@ -7,7 +7,14 @@ from unittest.mock import patch
 
 import pytest
 
-from verdryx.costper import cost_per_outcome, load_records, read_csv, read_ndjson, read_parquet
+from verdryx.costper import (
+    UNTAGGED,
+    cost_per_outcome,
+    load_records,
+    read_csv,
+    read_ndjson,
+    read_parquet,
+)
 from verdryx.models import OUTCOME_RESOLVED
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -219,7 +226,12 @@ def test_read_parquet_empty_directory_returns_empty_list(tmp_path, pyarrow_and_p
 def test_read_parquet_round_trip_through_cost_per_outcome(tmp_path, pyarrow_and_parquet) -> None:
     """The scenario the `traces` extra exists for: a tokenfuse Parquet
     trace, read directly and fed through the same cost_per_outcome
-    aggregation used for NDJSON/CSV input."""
+    aggregation used for NDJSON/CSV input.
+
+    No `run_id` column in this fixture, so this exercises the narrower
+    no-run_id path (see `_reduce_call_rows`): an untagged row has nothing
+    to fold its cost into and is dropped, rather than landing in the
+    UNTAGGED bucket the run_id-bearing tests below cover."""
     pa, pq = pyarrow_and_parquet
     table = pa.table(
         {
@@ -250,7 +262,8 @@ def test_read_parquet_round_trip_through_cost_per_outcome(tmp_path, pyarrow_and_
     assert report.abandoned.total_cost_usd == pytest.approx(0.08)
 
     # The untagged row is excluded from both the buckets and the overall
-    # pool: it is not a resolved outcome.
+    # pool: with no run_id column, it is not a resolved outcome and has no
+    # run to fold into.
     assert report.overall.count == 4
     assert report.overall.total_cost_usd == pytest.approx(0.88)
 
@@ -364,6 +377,161 @@ def test_read_parquet_reduces_a_run_split_across_multiple_files(
     )
 
     assert read_parquet(tmp_path) == [{"outcome": "case_resolved", "cost_usd": 0.70}]
+
+
+# ------------------------------------------------------------------
+# read_parquet -- aggregation parity with tokenfuse-core's compute_outcomes:
+# untagged calls fold into their run's bucket instead of being dropped, a
+# never-tagged run lands in the UNTAGGED bucket instead of vanishing, and a
+# Breaker-blocked call is counted but excluded from cost. All three need a
+# run_id column to have anywhere to fold into -- see `_reduce_call_rows`.
+# ------------------------------------------------------------------
+
+
+def test_read_parquet_folds_untagged_call_cost_into_its_runs_bucket(
+    tmp_path, pyarrow_and_parquet
+) -> None:
+    """An untagged mid-run call's cost must be added to its run's total,
+    not dropped, once a run_id is available to fold it into."""
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": ["r1", "r1"],
+            "step": [0, 1],
+            "outcome": ["", "case_resolved"],
+            "cost_microusd": [300_000, 200_000],
+        }
+    )
+    path = tmp_path / "calls-00000000.parquet"
+    pq.write_table(table, path)
+
+    assert read_parquet(path) == [{"outcome": "case_resolved", "cost_usd": 0.50}]
+
+
+def test_read_parquet_never_tagged_run_lands_in_untagged_bucket(
+    tmp_path, pyarrow_and_parquet
+) -> None:
+    """A run whose calls never carry a tag must still produce a record
+    (under UNTAGGED), not vanish from the report the way a run_id-less
+    untagged row does."""
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": ["r1", "r1"],
+            "step": [0, 1],
+            "outcome": ["", ""],
+            "cost_microusd": [100_000, 150_000],
+        }
+    )
+    path = tmp_path / "calls-00000000.parquet"
+    pq.write_table(table, path)
+
+    assert read_parquet(path) == [{"outcome": UNTAGGED, "cost_usd": 0.25}]
+
+    report = cost_per_outcome(read_parquet(path))
+    untagged = report.get(UNTAGGED)
+    assert untagged is not None
+    assert untagged.count == 1
+    assert untagged.total_cost_usd == pytest.approx(0.25)
+
+
+def test_read_parquet_excludes_blocked_call_cost_but_counts_the_call(
+    tmp_path, pyarrow_and_parquet
+) -> None:
+    """A Breaker-blocked call's cost_microusd is an avoided estimate, not a
+    real charge -- it must not inflate the run's total_cost_usd, even
+    though the run's winning tag still comes from its other, real call."""
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": ["r1", "r1"],
+            "step": [0, 1],
+            "outcome": ["", "case_resolved"],
+            "cost_microusd": [100_000, 9_000_000],
+            "decision": ["budget_exceeded", "allow"],
+        }
+    )
+    path = tmp_path / "calls-00000000.parquet"
+    pq.write_table(table, path)
+
+    # The blocked row's 100_000 (avoided estimate) must not count; only the
+    # real, allowed 9_000_000 call contributes.
+    assert read_parquet(path) == [{"outcome": "case_resolved", "cost_usd": 9.0}]
+
+
+def test_read_parquet_blocked_call_on_an_otherwise_untagged_run(
+    tmp_path, pyarrow_and_parquet
+) -> None:
+    """Blocked-cost exclusion and the UNTAGGED bucket compose: a run with
+    only a blocked call and no tag lands in UNTAGGED with zero cost, not
+    the avoided estimate."""
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": ["r1"],
+            "step": [0],
+            "outcome": [""],
+            "cost_microusd": [5_000_000],
+            "decision": ["dlp_blocked"],
+        }
+    )
+    path = tmp_path / "calls-00000000.parquet"
+    pq.write_table(table, path)
+
+    assert read_parquet(path) == [{"outcome": UNTAGGED, "cost_usd": 0.0}]
+
+
+def test_read_parquet_blocked_decision_missing_column_defaults_to_not_blocked(
+    tmp_path, pyarrow_and_parquet
+) -> None:
+    """A trace file predating the `decision` column (or one with a null
+    cell) must not silently zero out real cost -- missing/null decision
+    reads as "" (not blocked), same as the other tolerated columns."""
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": ["r1"],
+            "step": [0],
+            "outcome": ["case_resolved"],
+            "cost_microusd": [200_000],
+        }
+    )
+    path = tmp_path / "calls-00000000.parquet"
+    pq.write_table(table, path)
+
+    assert read_parquet(path) == [{"outcome": "case_resolved", "cost_usd": 0.20}]
+
+
+def test_read_parquet_tokenfuse_parity_fixture_mixed_tagged_untagged_blocked(
+    tmp_path, pyarrow_and_parquet
+) -> None:
+    """A small fixture mixing every case tokenfuse-core's compute_outcomes
+    handles in one pass: two calls resolving under the run's final tag (one
+    untagged, one tagged), a never-tagged run, and a blocked call whose
+    avoided cost must not count -- the parity target for this reduction."""
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": ["r1", "r1", "r2", "r2", "r3"],
+            "step": [0, 1, 0, 1, 0],
+            "outcome": ["", "case_resolved", "", "", "abandoned"],
+            "cost_microusd": [300_000, 200_000, 400_000, 9_000_000, 80_000],
+            "decision": ["allow", "allow", "allow", "budget_exceeded", "allow"],
+        }
+    )
+    path = tmp_path / "calls-00000000.parquet"
+    pq.write_table(table, path)
+
+    records = read_parquet(path)
+    assert {(r["outcome"], r["cost_usd"]) for r in records} == {
+        ("case_resolved", 0.50),  # r1: 300_000 untagged + 200_000 tagged
+        (UNTAGGED, 0.40),  # r2: 400_000 real + blocked 9_000_000 excluded
+        ("abandoned", 0.08),  # r3: single tagged call
+    }
+
+    report = cost_per_outcome(records)
+    assert report.overall.count == 3
+    assert report.overall.total_cost_usd == pytest.approx(0.98)
 
 
 def test_read_parquet_missing_pyarrow_raises_clear_import_error(tmp_path) -> None:

@@ -434,6 +434,32 @@ def test_cost_per_correct_command_accepts_traces_directory(
     assert "escalated" in out
 
 
+def test_cost_per_correct_command_lists_untagged_bucket_last(
+    tmp_path, capsys, pyarrow_and_parquet
+) -> None:
+    # UNTAGGED ("(untagged)") sorts alphabetically before any real tag on
+    # its leading "(" -- the CLI must still print it last, matching
+    # tokenfuse-core's own compute_outcomes row order.
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": ["r1", "r2", "r3"],
+            "step": [0, 0, 0],
+            "outcome": ["zzz_last_tag", "", "aaa_first_tag"],
+            "cost_microusd": [100_000, 200_000, 300_000],
+        }
+    )
+    pq.write_table(table, tmp_path / "calls-00000000.parquet")
+
+    main(["cost-per-correct", "--traces", str(tmp_path)])
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.strip()]
+    tags = ("aaa_first_tag", "zzz_last_tag", "(untagged)")
+    positions = {tag: i for i, line in enumerate(lines) for tag in tags if tag in line}
+    assert positions["aaa_first_tag"] < positions["(untagged)"]
+    assert positions["zzz_last_tag"] < positions["(untagged)"]
+
+
 def test_cost_per_correct_command_requires_input_or_traces() -> None:
     with pytest.raises(SystemExit) as exc_info:
         main(["cost-per-correct"])
