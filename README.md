@@ -62,6 +62,16 @@ flowchart TB
 
 The full stack is TokenFuse (spend), Wardryx (policy), Engram (memory), Idryx (access), Qryx (crypto), Verdryx (quality), Mockryx (pre-prod), on the shared Agent Passport + agent-event contract (agent-stack-go / agent-passport), configured via terraform-provider-taipan.
 
+## Live infrastructure validation
+
+Before any public launch, Verdryx computed cost-per-outcome from real Parquet traces produced by a live,
+Claude-backed multi-agent run: a correctly resolved case cost $0.00042, while an abandoned attempt still
+cost $0.00025 for nothing - the gap a dollar total alone can't show.
+
+![Verdryx outcome-quality dashboard: $0.00042 cost per resolved case, outcome mix, drift stable, real report engines](assets/10-verdryx.png)
+
+Full write-up and all numbers: [`VALIDATION.md`](VALIDATION.md).
+
 ---
 
 ## What it does
