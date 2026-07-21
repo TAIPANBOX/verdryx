@@ -199,3 +199,57 @@ def test_cost_per_outcome_report_named_accessors() -> None:
 def test_grader_kind_values_round_trip_through_string() -> None:
     for kind in GraderKind:
         assert GraderKind(kind.value) is kind
+
+
+# ------------------------------------------------------------------
+# eval-set validation: a clear error, not a raw traceback
+# ------------------------------------------------------------------
+
+
+def test_evalcase_missing_id_names_the_field():
+    import pytest
+
+    from verdryx.models import EvalCase
+
+    with pytest.raises(ValueError, match="missing the required field 'id'"):
+        EvalCase.from_dict({"prompt": "hi"})
+
+
+def test_evalset_points_at_the_offending_case():
+    import pytest
+
+    from verdryx.models import EvalSet
+
+    with pytest.raises(ValueError, match=r"case #2 .*missing the required field 'prompt'"):
+        EvalSet.from_dict({"id": "s", "cases": [{"id": "c1", "prompt": "ok"}, {"id": "c2"}]})
+
+
+def test_evalset_bad_grader_lists_the_choices():
+    import pytest
+
+    from verdryx.models import EvalSet
+
+    with pytest.raises(ValueError, match="not one of exact, regex"):
+        EvalSet.from_dict({"id": "s", "cases": [{"id": "c1", "prompt": "p", "grader": "nope"}]})
+
+
+def test_load_names_the_file(tmp_path):
+    import pytest
+
+    from verdryx.models import EvalSet
+
+    p = tmp_path / "broken.json"
+    p.write_text('{"cases": []}', encoding="utf-8")
+    with pytest.raises(ValueError, match=r"broken\.json:.*missing the required field 'id'"):
+        EvalSet.load(p)
+
+
+def test_load_reports_bad_json_with_the_path(tmp_path):
+    import pytest
+
+    from verdryx.models import EvalSet
+
+    p = tmp_path / "notjson.json"
+    p.write_text("{ this is not json", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"notjson\.json: not valid JSON"):
+        EvalSet.load(p)
