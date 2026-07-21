@@ -139,7 +139,10 @@ def run_eval(
 
 
 def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
-    evalset = EvalSet.load(args.evalset)
+    try:
+        evalset = EvalSet.load(args.evalset)
+    except ValueError as e:
+        _die(str(e))
     adapter = _build_adapter(args.model, config)
     run = run_eval(evalset, adapter, model=args.model)
 

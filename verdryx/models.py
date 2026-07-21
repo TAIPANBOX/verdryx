@@ -78,12 +78,21 @@ class EvalCase:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvalCase:
+        for field_name in ("id", "prompt"):
+            if field_name not in data:
+                raise ValueError(f"missing the required field {field_name!r}")
+        raw_grader = data.get("grader", GraderKind.EXACT.value)
+        try:
+            grader = GraderKind(raw_grader)
+        except ValueError:
+            allowed = ", ".join(g.value for g in GraderKind)
+            raise ValueError(f"field 'grader': {raw_grader!r} is not one of {allowed}") from None
         return cls(
             id=data["id"],
             prompt=data["prompt"],
             expected=data.get("expected"),
             rubric=data.get("rubric"),
-            grader=GraderKind(data.get("grader", GraderKind.EXACT.value)),
+            grader=grader,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,19 +113,47 @@ class EvalSet:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvalSet:
-        return cls(
-            id=data["id"],
-            cases=[EvalCase.from_dict(c) for c in data.get("cases", [])],
-        )
+        if "id" not in data:
+            raise ValueError("the eval set is missing the required field 'id'")
+        cases_raw = data.get("cases", [])
+        if not isinstance(cases_raw, list):
+            raise ValueError("field 'cases' must be a list")
+        cases = []
+        for i, c in enumerate(cases_raw):
+            if not isinstance(c, dict):
+                raise ValueError(f"case #{i + 1} must be an object")
+            try:
+                cases.append(EvalCase.from_dict(c))
+            except ValueError as e:
+                hint = f" ({c.get('id')!r})" if c.get("id") else ""
+                raise ValueError(f"case #{i + 1}{hint}: {e}") from e
+        return cls(id=data["id"], cases=cases)
 
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, "cases": [c.to_dict() for c in self.cases]}
 
     @classmethod
     def load(cls, path: str | Path) -> EvalSet:
-        """Load an eval set from a JSON file. See README.md for the shape."""
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-        return cls.from_dict(data)
+        """Load an eval set from a JSON file. See README.md for the shape.
+
+        Raises ValueError with the file named and the offending case and field
+        pointed at, rather than letting a raw KeyError/JSONDecodeError
+        traceback reach an operator who ran this by hand.
+        """
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError as e:
+            raise ValueError(f"{path}: cannot read: {e}") from e
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path}: not valid JSON: {e}") from e
+        if not isinstance(data, dict):
+            raise ValueError(f"{path}: top level must be a JSON object")
+        try:
+            return cls.from_dict(data)
+        except ValueError as e:
+            raise ValueError(f"{path}: {e}") from e
 
     def save(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.to_dict(), indent=2) + "\n", encoding="utf-8")

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 
+import pytest
+
 from verdryx.models import Baseline, EvalRun, Score
-from verdryx.store import Store
+from verdryx.store import SCHEMA_VERSION, Store
 
 
 def _run(run_id: str = "r1", model: str = "stub") -> EvalRun:
@@ -204,3 +207,61 @@ def test_baseline_survives_reopen(tmp_path) -> None:
         loaded = store.get_baseline("b1")
     assert loaded is not None
     assert loaded.mean_score == 0.42
+
+
+# ------------------------------------------------------------------
+# schema version
+# ------------------------------------------------------------------
+
+
+def _user_version(db_path) -> int:
+    raw = sqlite3.connect(str(db_path))
+    try:
+        return int(raw.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        raw.close()
+
+
+def test_new_store_is_stamped_with_the_schema_version(tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    with Store.open(db_path):
+        pass
+    assert _user_version(db_path) == SCHEMA_VERSION
+
+
+def test_a_store_written_before_stamping_is_upgraded_in_place(tmp_path) -> None:
+    """Version 0 is what every store written before this existed looks like.
+
+    It is indistinguishable from a fresh one (same tables), so it is simply
+    stamped on the next open rather than treated as foreign.
+    """
+    db_path = tmp_path / "store.db"
+    with Store.open(db_path) as store:
+        store.save_run(_run())
+    raw = sqlite3.connect(str(db_path))
+    raw.execute("PRAGMA user_version = 0")
+    raw.commit()
+    raw.close()
+
+    with Store.open(db_path) as store:
+        assert store.load_run("r1") is not None
+    assert _user_version(db_path) == SCHEMA_VERSION
+
+
+def test_a_newer_store_is_refused_rather_than_misread(tmp_path) -> None:
+    """Fail closed: this file is read by other processes too.
+
+    The Genaryx console opens this store directly as its quality plane, so a
+    build meeting a shape it does not know must say so instead of quietly
+    returning rows it may be reading wrong.
+    """
+    db_path = tmp_path / "store.db"
+    with Store.open(db_path):
+        pass
+    raw = sqlite3.connect(str(db_path))
+    raw.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(RuntimeError, match="newer than this verdryx"):
+        Store.open(db_path)

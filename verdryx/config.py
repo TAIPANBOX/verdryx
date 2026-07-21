@@ -19,8 +19,67 @@ ENV_OTLP_ENDPOINT = "VERDRYX_OTLP_ENDPOINT"
 ENV_ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 ENV_ANTHROPIC_BASE_URL = "ANTHROPIC_BASE_URL"
 
-#: Default SQLite store path when neither --db nor VERDRYX_DB is set.
-DEFAULT_DB = "verdryx.db"
+#: The installed stack's published home, where `stack-up` puts binaries, the
+#: shared venv and the per-tool stores. Honoured here for the same reason
+#: stack-up honours it: so the whole layout can be pointed at a scratch
+#: directory for a clean-machine test without touching the real one.
+ENV_TAIPAN_HOME = "TAIPAN_HOME"
+
+#: Filename of the SQLite store, shared by both the published-home and the
+#: working-directory candidates below.
+DB_FILENAME = "verdryx.db"
+
+#: Last-resort store path, relative to the process's working directory.
+DEFAULT_DB = DB_FILENAME
+
+
+def default_taipan_home(env: Mapping[str, str]) -> str:
+    """The published stack home: ``$TAIPAN_HOME``, else ``~/.taipan``.
+
+    Reads ``HOME`` from ``env`` rather than calling ``expanduser`` blindly,
+    so a caller passing an explicit mapping (tests, and any embedder) gets an
+    answer derived only from what it passed.
+    """
+    explicit = env.get(ENV_TAIPAN_HOME)
+    if explicit:
+        return explicit
+    user_home = env.get("HOME") or os.path.expanduser("~")
+    return os.path.join(user_home, ".taipan")
+
+
+def resolve_db_path(env: Mapping[str, str]) -> str:
+    """Where the store lives, most explicit candidate first.
+
+    1. ``VERDRYX_DB``, honoured verbatim even if it does not exist yet: an
+       explicit override must fail loudly on the path the operator named,
+       never fall through to a different store silently.
+    2. ``<taipan home>/verdryx.db``, but only when that directory already
+       exists, i.e. only on a machine where the stack is actually installed.
+    3. ``./verdryx.db``, this tool's historical default.
+
+    Why candidate 2 exists at all. Verdryx has no server, so its SQLite file
+    IS its machine-readable surface, and the Genaryx console reads it from
+    exactly these three places, in exactly this order (the console's own
+    ``quality/env.rs`` documents the same list). Before this, verdryx wrote
+    to the working directory while the console looked in the published home,
+    so a plain ``verdryx eval`` run from anywhere else produced real results
+    the console could never find. Nothing was lost, but nothing was seen
+    either, which for a plane whose entire job is to be looked at amounts to
+    the same thing.
+
+    Note the deliberate asymmetry with the console: the console requires the
+    FILE to exist before trusting candidate 2 (an unchecked guess would be
+    indistinguishable from a real stack-managed store), while this function
+    requires only the DIRECTORY. It has to: on the write side, waiting for
+    the file to exist would mean nothing ever creates it.
+    """
+    explicit = env.get(ENV_DB)
+    if explicit:
+        return explicit
+    home = default_taipan_home(env)
+    if os.path.isdir(home):
+        return os.path.join(home, DB_FILENAME)
+    return DEFAULT_DB
 
 
 @dataclass(frozen=True)
@@ -53,7 +112,7 @@ class Config:
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
         e = env if env is not None else os.environ
         return cls(
-            db_path=e.get(ENV_DB) or DEFAULT_DB,
+            db_path=resolve_db_path(e),
             events_path=e.get(ENV_EVENTS_PATH) or None,
             otlp_endpoint=e.get(ENV_OTLP_ENDPOINT) or None,
             anthropic_api_key=e.get(ENV_ANTHROPIC_API_KEY) or None,
