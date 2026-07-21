@@ -310,13 +310,38 @@ Read once, at process start, into `verdryx.config.Config`:
 
 | Variable | Meaning |
 |---|---|
-| `VERDRYX_DB` | Default SQLite store path (default: `verdryx.db`) |
+| `VERDRYX_DB` | SQLite store path, honoured verbatim (see the resolution order below) |
+| `TAIPAN_HOME` | The installed stack's home (default: `~/.taipan`), used to place the store when the stack is installed |
 | `VERDRYX_EVENTS_PATH` | Default NDJSON event log path (default: unset, events disabled) |
 | `VERDRYX_OTLP_ENDPOINT` | OTLP/HTTP collector base URL; one span per `eval`/`drift` run (default: unset, OTLP export disabled) |
 | `ANTHROPIC_API_KEY` | API key for the real `AnthropicAdapter` |
 | `ANTHROPIC_BASE_URL` | Proxy endpoint (e.g. TokenFuse) for the real `AnthropicAdapter` |
 
 CLI flags (`--db`, `--events`) always take precedence over the environment.
+
+### Where the store ends up
+
+Most explicit candidate first:
+
+1. `--db <path>`
+2. `VERDRYX_DB`, honoured even if the path does not exist yet, so an explicit
+   override fails on the path you named rather than silently redirecting to a
+   different store
+3. `<TAIPAN_HOME>/verdryx.db` (default `~/.taipan/verdryx.db`), but only when
+   that directory already exists, i.e. only when the stack is installed
+4. `./verdryx.db`, relative to the current working directory
+
+Candidate 3 exists because Verdryx has no server: this SQLite file *is* its
+machine-readable surface, and other tools read it directly, the Genaryx
+console among them. Writing to the working directory while readers look in
+the installed home does not lose results, it hides them.
+
+Nothing here creates a directory as a side effect. If the stack is not
+installed, the historical `./verdryx.db` behaviour is unchanged.
+
+The file carries its schema version in SQLite's `PRAGMA user_version`. A
+store stamped newer than the running build understands is refused on open
+rather than read with the wrong assumptions.
 
 ---
 

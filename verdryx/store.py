@@ -56,9 +56,41 @@ def _parse_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
+#: Schema version stamped into `PRAGMA user_version`. Bump this only
+#: together with a real change to `_DDL` that an older reader would
+#: misinterpret.
+SCHEMA_VERSION = 1
+
+
 def migrate(conn: sqlite3.Connection) -> None:
-    """Create all tables and indexes. Idempotent, safe to call repeatedly."""
+    """Create all tables and indexes. Idempotent, safe to call repeatedly.
+
+    Also stamps `PRAGMA user_version`, which was previously left at SQLite's
+    default of 0. This does NOT introduce a migration framework: "CREATE
+    TABLE IF NOT EXISTS is the whole migration story" still holds. What it
+    introduces is the ability to have one later. A version stamp is the only
+    part that cannot be retrofitted: stores already written without it are
+    indistinguishable from fresh ones, so every day this is missing produces
+    more files a future migration could not reason about.
+
+    It also lets a reader fail closed. This file is read directly by other
+    processes (the Genaryx console opens it as its quality plane), and a
+    reader that meets a shape it does not know should say so rather than
+    quietly return wrong rows, which is why a store stamped NEWER than this
+    build understands is refused outright rather than opened.
+    """
     conn.executescript(_DDL)
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"this store's schema version is {current}, newer than this "
+            f"verdryx understands ({SCHEMA_VERSION}); upgrade verdryx rather "
+            "than risk misreading it"
+        )
+    if current != SCHEMA_VERSION:
+        # Not parameterisable: PRAGMA does not take bound values. The
+        # interpolated value is this module's own int constant.
+        conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
     conn.commit()
 
 
