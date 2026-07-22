@@ -62,6 +62,8 @@ flowchart TB
 
 The full stack is TokenFuse (spend), Wardryx (policy), Engram (memory), Idryx (access), Qryx (crypto), Verdryx (quality), Mockryx (pre-prod), on the shared Agent Passport + agent-event contract (agent-stack-go / agent-passport), configured via terraform-provider-taipan.
 
+Run the whole open stack locally with one command via [**stack-up**](https://github.com/TAIPANBOX/stack-up); the stack's home on the web is [**it-rat.com**](https://it-rat.com).
+
 ## Live infrastructure validation
 
 Before any public launch, Verdryx computed cost-per-outcome from real Parquet traces produced by a live,
