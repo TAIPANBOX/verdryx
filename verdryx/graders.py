@@ -1,6 +1,6 @@
 """Grader implementations: turn one EvalCase's model output into a GradeResult.
 
-Four grader kinds, matching models.GraderKind:
+Five grader kinds, matching models.GraderKind:
 
 - ExactGrader: output == case.expected.
 - RegexGrader: case.expected is a regex, matched against output.
@@ -9,16 +9,26 @@ Four grader kinds, matching models.GraderKind:
 - LLMJudgeGrader: an injected LLMAdapter scores output 0..1 against
   case.rubric, and reports the judge call's dollar cost (see
   ``verdryx.pricing.PriceBook``) alongside its token usage.
+- ToolTraceGrader: scores WHICH tools the model chose and IN WHAT ORDER,
+  from the ordered tool_use names in a Completion (see
+  ``LLMAdapter.complete_with_tools``). Single-turn only -- it grades the
+  model's first response, never executes a tool, and never becomes an
+  agent runtime.
 
-Every grader implements the same shape, ``grade(case, output) -> GradeResult``
-(Protocol ``Grader`` below), so verdryx.cli's eval loop can dispatch to
-whichever one an EvalCase asks for without a branch per grader kind.
+The first four graders implement the same shape, ``grade(case, output) ->
+GradeResult`` (Protocol ``Grader`` below), so verdryx.cli's eval loop can
+dispatch to whichever one an EvalCase asks for without a branch per grader
+kind. ToolTraceGrader is the one exception: it is still registered in the
+same ``build_graders()`` dict, but is dispatched specially through
+``grade_trace(case, completion)`` instead, since a tool trace is an ordered
+list of tool names, not free-text output -- the base ``Grader`` protocol is
+left untouched.
 
 This module is measurement only. It grades what a model already produced; it
 never constructs a prompt intended to manipulate that model, and the only
 outbound network call it can make (AnthropicAdapter, when constructed with
-real credentials) asks an LLM to *score* a given output, never to act on
-behalf of anyone.
+real credentials) asks an LLM to *score* a given output or *choose* tools it
+never executes, never to act on behalf of anyone.
 """
 
 from __future__ import annotations
@@ -27,7 +37,7 @@ import logging
 import re
 from typing import Any, Protocol, runtime_checkable
 
-from verdryx.models import DEFAULT_OUTCOME_SCORES, EvalCase, GradeResult, GraderKind
+from verdryx.models import DEFAULT_OUTCOME_SCORES, Completion, EvalCase, GradeResult, GraderKind
 from verdryx.pricing import PriceBook
 
 logger = logging.getLogger(__name__)
@@ -132,6 +142,17 @@ class LLMAdapter(Protocol):
         itself (e.g. StubLLMAdapter's default)."""
         ...
 
+    def complete_with_tools(self, prompt: str, tools: list[dict[str, object]]) -> Completion:
+        """Return a Completion for GraderKind.TOOL_TRACE cases: send
+        `prompt` to the model under evaluation with `tools` (provider-shape
+        tool definitions, passed through verbatim) and parse the ordered
+        tool_use names out of its response. Single-turn only -- this sends
+        exactly one request and never executes a tool or continues the
+        conversation with a tool_result; Verdryx grades the model's own
+        tool selection and order, it does not become an agent runtime. Not
+        called for grader kinds other than GraderKind.TOOL_TRACE."""
+        ...
+
 
 class StubLLMAdapter:
     """Deterministic stand-in for a real LLM. For tests only: no network call.
@@ -139,10 +160,17 @@ class StubLLMAdapter:
     Records every call it receives so tests can assert on what was asked,
     mirroring engram.llm.StubLLMAdapter's role in Engram's own test suite.
 
-    `cost_usd` only feeds `judge()`: `complete()` always reports 0.0,
-    since there is no real billed call behind this stub to price -- unlike
-    AnthropicAdapter, whose `complete()` really does price itself via a
-    PriceBook (see below).
+    `cost_usd` only feeds `judge()`: `complete()` and `complete_with_tools()`
+    always report 0.0, since there is no real billed call behind this stub
+    to price -- unlike AnthropicAdapter, whose `complete()` and
+    `complete_with_tools()` really do price themselves via a PriceBook (see
+    below).
+
+    `complete_with_tools()`'s ordered `tool_names` default to a single-item
+    list holding the first entry in `tools`' own `"name"` (or `[]` when
+    `tools` is empty); pass `tool_names_to_return` to return a specific
+    ordered trace instead, e.g. to exercise ToolTraceGrader's partial-credit
+    scoring in a test.
     """
 
     def __init__(
@@ -151,13 +179,16 @@ class StubLLMAdapter:
         judge_value: float = 1.0,
         tokens: int = 0,
         cost_usd: float = 0.0,
+        tool_names_to_return: list[str] | None = None,
     ) -> None:
         self.completion = completion
         self.judge_value = judge_value
         self.tokens = tokens
         self.cost_usd = cost_usd
+        self.tool_names_to_return = tool_names_to_return
         self.completions: list[str] = []
         self.judgements: list[tuple[str, str, str]] = []
+        self.tool_completions: list[tuple[str, list[dict[str, object]]]] = []
 
     def complete(self, prompt: str) -> tuple[str, int, float]:
         self.completions.append(prompt)
@@ -166,6 +197,17 @@ class StubLLMAdapter:
     def judge(self, prompt: str, output: str, rubric: str) -> tuple[float, int, float]:
         self.judgements.append((prompt, output, rubric))
         return self.judge_value, self.tokens, self.cost_usd
+
+    def complete_with_tools(self, prompt: str, tools: list[dict[str, object]]) -> Completion:
+        self.tool_completions.append((prompt, tools))
+        if self.tool_names_to_return is not None:
+            tool_names = list(self.tool_names_to_return)
+        elif tools:
+            first_name = tools[0].get("name")
+            tool_names = [first_name] if isinstance(first_name, str) else []
+        else:
+            tool_names = []
+        return Completion(text="stub", tool_names=tool_names, tokens=self.tokens, cost_usd=0.0)
 
 
 _JUDGE_SYSTEM_PROMPT = (
@@ -220,6 +262,34 @@ def _anthropic_text(response: Any) -> str:
     return ""
 
 
+def _anthropic_completion_parts(response: Any) -> tuple[str, list[str]]:
+    """Pull every text block (concatenated, in order) and every tool_use
+    block's name (in order) out of an Anthropic Messages response's content
+    list, for AnthropicAdapter.complete_with_tools().
+
+    Discriminates on each block's own `type` field (real Anthropic
+    TextBlock/ToolUseBlock objects always carry one) rather than
+    _anthropic_text's looser "has a .text attribute" duck-typing, since a
+    tool_use block's `name` must not be mistaken for text or vice versa.
+    Skips any block whose type is neither, so a structurally surprising
+    response degrades toward ("", []) instead of raising.
+    """
+    content = getattr(response, "content", None) or []
+    texts: list[str] = []
+    tool_names: list[str] = []
+    for block in content:
+        block_type = getattr(block, "type", None)
+        if block_type == "text":
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                texts.append(text)
+        elif block_type == "tool_use":
+            name = getattr(block, "name", None)
+            if isinstance(name, str):
+                tool_names.append(name)
+    return "".join(texts), tool_names
+
+
 class LLMJudgeGrader:
     """Scores output 0..1 against case.rubric using an injected LLMAdapter.
 
@@ -240,6 +310,56 @@ class LLMJudgeGrader:
         return GradeResult(value=min(max(value, 0.0), 1.0), tokens=tokens, cost_usd=cost_usd)
 
 
+def _lcs_length(a: list[str], b: list[str]) -> int:
+    """Length of the longest common subsequence of two ordered string
+    sequences (classic O(len(a) * len(b)) dynamic program, one row of state
+    at a time). Used by ToolTraceGrader for partial credit on tool-call
+    order: an extra call, a missing call, or a swapped pair all shrink the
+    LCS below a full match without dropping straight to zero."""
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    for x in a:
+        curr = [0] * (len(b) + 1)
+        for j, y in enumerate(b, start=1):
+            curr[j] = prev[j - 1] + 1 if x == y else max(prev[j], curr[j - 1])
+        prev = curr
+    return prev[-1]
+
+
+class ToolTraceGrader:
+    """Scores WHICH tools a model chose and IN WHAT ORDER, from the ordered
+    tool_use names in a Completion (see LLMAdapter.complete_with_tools()).
+
+    Not a Grader in the base Protocol's sense: `grade_trace()` takes a
+    Completion, not a plain `output: str`, since a tool trace is an ordered
+    list of tool names rather than free text. verdryx.cli's eval loop
+    dispatches GraderKind.TOOL_TRACE cases here through `grade_trace()`
+    specially, instead of through the shared `grade(case, output)` shape
+    the other four graders use; build_graders() still registers a
+    ToolTraceGrader unconditionally in the same dict, since -- unlike
+    LLMJudgeGrader -- it needs no adapter of its own to construct.
+
+    Scoring is deterministic and dependency-free (no LLM call, no judge):
+
+    - Exact ordered match of `completion.tool_names` against
+      `case.expected_tools` (including both being empty, meaning the model
+      correctly called no tools) scores 1.0.
+    - Otherwise, the score is the longest-common-subsequence length between
+      the two ordered lists, divided by the longer list's length -- a value
+      in [0, 1) that rewards partial, order-preserving overlap rather than
+      collapsing an imperfect trace straight to 0.0.
+    """
+
+    def grade_trace(self, case: EvalCase, completion: Completion) -> GradeResult:
+        expected = case.expected_tools if case.expected_tools is not None else []
+        actual = completion.tool_names
+        if actual == expected:
+            return GradeResult(value=1.0)
+        longest = max(len(actual), len(expected))
+        return GradeResult(value=_lcs_length(actual, expected) / longest)
+
+
 class AnthropicAdapter:
     """LLMAdapter backed by the Anthropic Messages API.
 
@@ -255,8 +375,8 @@ class AnthropicAdapter:
         base_url: Optional custom endpoint (e.g. a TokenFuse proxy URL).
         api_key: Explicit API key. When unset, the Anthropic SDK falls back
             to the ANTHROPIC_API_KEY environment variable itself.
-        price_book: Table used to price both complete() (the model under
-            evaluation's own completion) and judge() calls. Defaults to
+        price_book: Table used to price complete(), judge(), and
+            complete_with_tools() calls alike. Defaults to
             `PriceBook.default()` (TokenFuse's own default price book,
             ported number-for-number; see verdryx.pricing). Inject a custom
             one to price a model TokenFuse doesn't list, or to test pricing
@@ -320,23 +440,45 @@ class AnthropicAdapter:
         value = _parse_judge_score(_anthropic_text(response))
         return value, input_tokens + output_tokens, cost_usd
 
+    def complete_with_tools(self, prompt: str, tools: list[dict[str, object]]) -> Completion:
+        client = self._get_client()
+        response = client.messages.create(
+            model=self.model_name,
+            max_tokens=1024,
+            temperature=0.0,
+            tools=tools,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        input_tokens = response.usage.input_tokens
+        output_tokens = response.usage.output_tokens
+        cost_usd = self._price_book.price(self.model_name, input_tokens, output_tokens)
+        text, tool_names = _anthropic_completion_parts(response)
+        return Completion(
+            text=text, tool_names=tool_names, tokens=input_tokens + output_tokens, cost_usd=cost_usd
+        )
+
 
 def build_graders(
     *,
     outcome_map: dict[str, float] | None = None,
     judge_adapter: LLMAdapter | None = None,
-) -> dict[GraderKind, Grader]:
+) -> dict[GraderKind, Grader | ToolTraceGrader]:
     """Construct the default grader for each GraderKind.
 
     judge_adapter must be supplied for GraderKind.LLM_JUDGE cases to be
     gradable; omitting it is fine for eval sets that never use that kind
     (the resulting dict simply has no entry for it, and verdryx.cli raises
-    a clear error if a case needs it anyway).
+    a clear error if a case needs it anyway). GraderKind.TOOL_TRACE's
+    ToolTraceGrader is registered unconditionally: unlike LLMJudgeGrader it
+    needs no adapter of its own -- it scores a Completion the eval runner
+    already obtained by calling LLMAdapter.complete_with_tools() itself,
+    not a fresh model call ToolTraceGrader makes on its own.
     """
-    graders: dict[GraderKind, Grader] = {
+    graders: dict[GraderKind, Grader | ToolTraceGrader] = {
         GraderKind.EXACT: ExactGrader(),
         GraderKind.REGEX: RegexGrader(),
         GraderKind.OUTCOME_TAG: OutcomeTagGrader(mapping=outcome_map),
+        GraderKind.TOOL_TRACE: ToolTraceGrader(),
     }
     if judge_adapter is not None:
         graders[GraderKind.LLM_JUDGE] = LLMJudgeGrader(judge_adapter)

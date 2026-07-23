@@ -25,6 +25,28 @@ from verdryx.graders import AnthropicAdapter, StubLLMAdapter
 from verdryx.models import Baseline, EvalCase, EvalSet, GraderKind
 from verdryx.store import Store
 
+#: A minimal, provider-shape tool definition, reused across the
+#: GraderKind.TOOL_TRACE tests below.
+_LOOKUP_ORDER_TOOL = {
+    "name": "lookup_order",
+    "description": "Look up an order by id",
+    "input_schema": {"type": "object", "properties": {"order_id": {"type": "string"}}},
+}
+
+
+class _NoToolsAdapter:
+    """A minimal third-party LLMAdapter that implements complete()/judge()
+    but not complete_with_tools() -- stands in for a hand-rolled adapter
+    that predates GraderKind.TOOL_TRACE, to exercise run_eval's
+    adapter-missing-method death path."""
+
+    def complete(self, prompt: str) -> tuple[str, int, float]:
+        return "output", 0, 0.0
+
+    def judge(self, prompt: str, output: str, rubric: str) -> tuple[float, int, float]:
+        return 1.0, 0, 0.0
+
+
 # ------------------------------------------------------------------
 # run_eval: the non-argparse core, exercised directly with a stub adapter
 # ------------------------------------------------------------------
@@ -109,6 +131,125 @@ def test_run_eval_prices_the_completion_not_just_the_judge() -> None:
 
 
 # ------------------------------------------------------------------
+# run_eval: GraderKind.TOOL_TRACE cases
+# ------------------------------------------------------------------
+
+
+def test_run_eval_tool_trace_case_calls_complete_with_tools_not_complete() -> None:
+    evalset = EvalSet(
+        id="s",
+        cases=[
+            EvalCase(
+                id="tools-1",
+                prompt="handle it",
+                grader=GraderKind.TOOL_TRACE,
+                tools=[_LOOKUP_ORDER_TOOL],
+                expected_tools=["lookup_order"],
+            )
+        ],
+    )
+    adapter = StubLLMAdapter()
+    run = run_eval(evalset, adapter, model="stub")
+    assert adapter.tool_completions == [("handle it", [_LOOKUP_ORDER_TOOL])]
+    assert adapter.completions == []  # tool_trace never calls plain complete()
+    # StubLLMAdapter defaults to calling tools[0]'s name, an exact match
+    # against expected_tools=["lookup_order"].
+    assert run.scores[0].value == 1.0
+    assert run.scores[0].case_id == "tools-1"
+
+
+def test_run_eval_tool_trace_case_folds_completion_tokens_and_cost_into_score() -> None:
+    evalset = EvalSet(
+        id="s",
+        cases=[
+            EvalCase(
+                id="tools-1",
+                prompt="handle it",
+                grader=GraderKind.TOOL_TRACE,
+                tools=[_LOOKUP_ORDER_TOOL],
+                expected_tools=["lookup_order"],
+            )
+        ],
+    )
+    adapter = StubLLMAdapter(tokens=9)
+    run = run_eval(evalset, adapter, model="stub")
+    # ToolTraceGrader.grade_trace() reports zero tokens/cost of its own; the
+    # completion's own tokens (StubLLMAdapter's cost_usd for
+    # complete_with_tools is always 0.0, mirroring complete()) are what
+    # land in Score.
+    assert run.scores[0].tokens == 9
+    assert run.scores[0].cost_usd == 0.0
+
+
+def test_run_eval_tool_trace_case_partial_credit_scores_between_zero_and_one() -> None:
+    evalset = EvalSet(
+        id="s",
+        cases=[
+            EvalCase(
+                id="tools-1",
+                prompt="handle it",
+                grader=GraderKind.TOOL_TRACE,
+                tools=[_LOOKUP_ORDER_TOOL],
+                expected_tools=["lookup_order", "issue_refund"],
+            )
+        ],
+    )
+    adapter = StubLLMAdapter()  # defaults to ["lookup_order"] only
+    run = run_eval(evalset, adapter, model="stub")
+    assert 0.0 < run.scores[0].value < 1.0
+
+
+def test_run_eval_mixed_tool_trace_and_exact_cases(sample_evalset) -> None:
+    """A mixed eval set covering tool_trace alongside another grader kind:
+    both cases score, independently, over one run."""
+    evalset = EvalSet(
+        id="s",
+        cases=[
+            *sample_evalset.cases,  # exact / regex / outcome_tag / llm_judge
+            EvalCase(
+                id="tools-1",
+                prompt="handle it",
+                grader=GraderKind.TOOL_TRACE,
+                tools=[_LOOKUP_ORDER_TOOL],
+                expected_tools=["lookup_order"],
+            ),
+        ],
+    )
+    adapter = StubLLMAdapter()
+    run = run_eval(evalset, adapter, model="stub")
+    assert len(run.scores) == len(evalset.cases)
+    assert run.mean_score == pytest.approx(1.0)
+    by_id = {s.case_id: s for s in run.scores}
+    assert by_id["tools-1"].value == 1.0
+
+
+def test_run_eval_dies_clearly_when_adapter_lacks_complete_with_tools(capsys) -> None:
+    """A custom third-party LLMAdapter lacking complete_with_tools() dies
+    with a message naming both the adapter and the missing method, instead
+    of failing deep in the loop with an opaque AttributeError."""
+    evalset = EvalSet(
+        id="s",
+        cases=[
+            EvalCase(
+                id="tools-1",
+                prompt="handle it",
+                grader=GraderKind.TOOL_TRACE,
+                tools=[_LOOKUP_ORDER_TOOL],
+                expected_tools=["lookup_order"],
+            )
+        ],
+    )
+    adapter = _NoToolsAdapter()
+    with pytest.raises(SystemExit) as exc_info:
+        run_eval(evalset, adapter, model="stub")
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "_NoToolsAdapter" in err
+    assert "complete_with_tools" in err
+    assert "tools-1" in err
+
+
+# ------------------------------------------------------------------
 # CLI: eval -> baseline -> drift -> cost-per-correct, end to end via main()
 # ------------------------------------------------------------------
 
@@ -127,6 +268,43 @@ def test_eval_command_stores_a_run_and_prints_scores(
     assert len(runs) == 1
     assert runs[0].model == "stub"
     assert len(runs[0].scores) == len(sample_evalset.cases)
+
+
+def test_eval_command_mixed_tool_trace_and_exact_cases_lands_scores_in_store(
+    tmp_path, capsys
+) -> None:
+    """End-to-end via main(): a mixed eval set (tool_trace + exact cases)
+    graded with the stub adapter, no network anywhere, scores landing in
+    the SQLite store exactly like any other grader kind's."""
+    evalset = EvalSet(
+        id="mixed-v1",
+        cases=[
+            EvalCase(
+                id="exact-1", prompt="say hi", expected="stub output", grader=GraderKind.EXACT
+            ),
+            EvalCase(
+                id="tools-1",
+                prompt="handle it",
+                grader=GraderKind.TOOL_TRACE,
+                tools=[_LOOKUP_ORDER_TOOL],
+                expected_tools=["lookup_order"],
+            ),
+        ],
+    )
+    evalset_path = tmp_path / "mixed.json"
+    evalset.save(evalset_path)
+    db = tmp_path / "store.db"
+
+    main(["eval", str(evalset_path), "--model", "stub", "--db", str(db)])
+    out = capsys.readouterr().out
+    assert "mean score: 1.000" in out
+
+    with Store.open(db) as store:
+        runs = store.list_runs()
+    assert len(runs) == 1
+    assert len(runs[0].scores) == 2
+    by_id = {s.case_id: s.value for s in runs[0].scores}
+    assert by_id == {"exact-1": 1.0, "tools-1": 1.0}
 
 
 def test_eval_command_with_no_cases_prints_no_cases(tmp_path, capsys) -> None:

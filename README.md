@@ -86,7 +86,7 @@ asks for without special-casing.
 | Stage | What it covers |
 |---|---|
 | **Eval runner** | `verdryx.cli.run_eval` / `verdryx eval`: loads an `EvalSet` (a list of `EvalCase` prompts), calls a model for each case, grades the output, and stores the result as an `EvalRun` of per-case `Score`s in a local SQLite file |
-| **Four graders** | `verdryx/graders.py`: exact match, regex match, a `tokenfuse x-fuse-outcome` tag lookup, and an LLM-judged rubric |
+| **Five graders** | `verdryx/graders.py`: exact match, regex match, a `tokenfuse x-fuse-outcome` tag lookup, an LLM-judged rubric, and tool-call accuracy (which tools, in what order) |
 | **Baselines and drift** | `verdryx/drift.py`: snapshot an `EvalRun`'s mean score as a `Baseline`, then compare a window of later runs against it |
 | **Cost per outcome** | `verdryx/costper.py`: given a flat export of `{outcome, cost_usd}` records, computes cost-per-resolved-case, cost-per-escalated, cost-per-abandoned, and overall |
 | **Opt-in event log** | `verdryx/events.py`: an NDJSON writer for the shared TAIPANBOX Agent Passport event envelope (schema `taipanbox.dev/agent-event/v0.2`, `source: "verdryx"`), so `eval_run`, `quality_score`, and `quality_drift` events reach the rest of the governance stack |
@@ -102,7 +102,10 @@ asks for without special-casing.
 
 Every case resolves to a `Score` in `[0.0, 1.0]`; every drift check resolves
 to one of two named verdicts. Four graders share one shape (`grade()` on an
-`EvalCase`), so `verdryx eval` dispatches to whichever a case asks for:
+`EvalCase`), so `verdryx eval` dispatches to whichever a case asks for; a
+fifth, `ToolTraceGrader`, is dispatched differently since it scores a tool
+trace rather than free text (see
+[Tool-call accuracy](#tool-call-accuracy-tool_trace) below):
 
 | Grader | `case.expected` / `case.rubric` | Scores 1.0 when |
 |---|---|---|
@@ -110,6 +113,7 @@ to one of two named verdicts. Four graders share one shape (`grade()` on an
 | `RegexGrader` | `expected`: a regex pattern | `re.search(expected, output)` matches |
 | `OutcomeTagGrader` | none (reads `output` itself) | `output` is a tag mapped to `1.0` in its table |
 | `LLMJudgeGrader` | `rubric`: grading instructions | the injected judge scores the rubric that high |
+| `ToolTraceGrader` | `tools` / `expected_tools`: see below | the model's ordered tool calls exactly match `expected_tools` |
 
 `OutcomeTagGrader`'s default table is `{"case_resolved": 1.0, "escalated":
 0.5, "abandoned": 0.0}` (`verdryx.DEFAULT_OUTCOME_SCORES`), fully overridable
@@ -164,6 +168,101 @@ baseline run has at least two scores to compare against (it already loads
 that run to filter by model, so this is free). On `regressed`, and only
 then, it emits a `quality_drift` event (severity `high`) if an event log is
 configured; `on-track` checks are not reported as events.
+
+---
+
+## Tool-call accuracy (tool_trace)
+
+A fifth grader, `ToolTraceGrader`, scores WHICH tools a model chose and IN
+WHAT ORDER, straight from the model's own `tool_use` content blocks. Verdryx
+already calls the model under evaluation for every non-`outcome_tag` case
+(via `LLMAdapter`); a `tool_trace` case sends the same prompt with a `tools`
+array attached and grades what the model chose to call, in the order it
+chose to call them.
+
+```json
+{
+  "id": "support-tier1-tools-v1",
+  "cases": [
+    {
+      "id": "refund-flow-tools",
+      "prompt": "The customer's order #4471 arrived damaged. Handle it.",
+      "grader": "tool_trace",
+      "tools": [
+        {
+          "name": "lookup_order",
+          "description": "Look up an order by id",
+          "input_schema": {
+            "type": "object",
+            "properties": { "order_id": { "type": "string" } },
+            "required": ["order_id"]
+          }
+        },
+        {
+          "name": "issue_refund",
+          "description": "Issue a refund for an order",
+          "input_schema": {
+            "type": "object",
+            "properties": { "order_id": { "type": "string" } },
+            "required": ["order_id"]
+          }
+        }
+      ],
+      "expected_tools": ["lookup_order", "issue_refund"]
+    }
+  ]
+}
+```
+
+`tools` is a small array of provider-shape tool definitions (the Anthropic
+Messages API's own `tools` shape), passed to the adapter verbatim -- Verdryx
+does not reinterpret or validate the schema inside it. `expected_tools` is
+the ordered list of tool NAMES a correct response should call; an empty
+list (`"expected_tools": []`) is legal and means the model is expected to
+call no tools at all for that case.
+
+### How scoring works
+
+`ToolTraceGrader.grade_trace()` compares the model's own ordered tool names
+against `expected_tools`:
+
+- **Exact ordered match** -- including both lists being empty, meaning the
+  model correctly called no tools -- scores `1.0`.
+- **Otherwise**, the score is the length of the longest common subsequence
+  (LCS) between the two ordered lists, divided by the longer list's length,
+  a value in `[0, 1)`. A swapped order, an extra call, or a missing call
+  each cost credit smoothly instead of the case scoring `0.0` outright; a
+  completely disjoint trace still lands at `0.0`.
+
+### Single-turn, no execution, by design
+
+Verdryx grades the model's **first response's** tool selection and order,
+nothing more. It never executes a tool, never sends a `tool_result` back,
+and never continues the conversation to a second turn. Verdryx does not
+call tools itself and does not become an agent runtime -- it is, and will
+stay, a grader that reads what the model chose to call.
+
+### Why this grader runs live, not from stored traces
+
+Every other Verdryx grader can, in principle, be pointed at data someone
+already recorded. `tool_trace` cannot: TokenFuse's own Parquet traces record
+only a tool-call **count** per call (see `tokenfuse`'s `docs/21` trace
+schema), never the tool **names** or their **order** -- there is nothing in
+a stored trace for this grader to read. Scoring tool selection and order
+therefore requires calling the model under evaluation directly, via
+`LLMAdapter.complete_with_tools()`, once per case, rather than reading it
+back out of TokenFuse afterward.
+
+### Drift and baselines work on this unchanged
+
+`ToolTraceGrader.grade_trace()` returns a plain `GradeResult`, folded into
+the same `Score` shape by `verdryx.cli.run_eval` as every other grader.
+`compute_drift` and `verdryx baseline`/`verdryx drift` never look at grader
+kind, only at `Score.value`, so a baseline set from a `tool_trace` run and a
+later drift check against it work with no extra plumbing at all. In
+practice this means tool-selection drift -- a model quietly starts skipping
+a step, or reordering two calls -- shows up in `verdryx drift` the same way
+any other quality regression does: tool-selection drift detection for free.
 
 ---
 
@@ -447,7 +546,8 @@ slipping?
 ## Status
 
 - [x] Eval runner (`verdryx eval`): `EvalSet`/`EvalCase` loader, per-case grading, `EvalRun` persisted to SQLite
-- [x] Four graders: `ExactGrader`, `RegexGrader`, `OutcomeTagGrader`, `LLMJudgeGrader`
+- [x] Five graders: `ExactGrader`, `RegexGrader`, `OutcomeTagGrader`, `LLMJudgeGrader`, `ToolTraceGrader`
+- [x] Tool-call accuracy (`tool_trace`): single-turn, no-execution grading of a model's own ordered `tool_use` names via `LLMAdapter.complete_with_tools`, exact-match/LCS-partial-credit scoring, drift/baselines work on its scores unchanged
 - [x] `StubLLMAdapter` (deterministic, offline, used by CI) and `AnthropicAdapter` (real Messages API, `base_url` proxy support, prompt-injection-resistant judge wrapping)
 - [x] Judge call pricing: `verdryx.pricing.PriceBook`, a dependency-free port of TokenFuse's default price book, populates `Score.cost_usd` for `llm_judge` cases
 - [x] Baselines and drift: `compute_drift`, flat-threshold `on-track`/`regressed` verdict plus a Welch's-t/bootstrap-CI significance check, `verdryx drift` CLI
