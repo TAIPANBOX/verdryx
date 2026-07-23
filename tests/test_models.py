@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime
 
 import pytest
@@ -12,6 +13,7 @@ from verdryx.models import (
     OUTCOME_ESCALATED,
     OUTCOME_RESOLVED,
     Baseline,
+    Completion,
     CostPerOutcomeReport,
     DriftReport,
     EvalCase,
@@ -22,6 +24,14 @@ from verdryx.models import (
     OutcomeCost,
     Score,
 )
+
+#: A minimal, provider-shape tool definition (Anthropic Messages API `tools`
+#: shape), reused across the GraderKind.TOOL_TRACE validation tests below.
+_A_TOOL = {
+    "name": "lookup_order",
+    "description": "Look up an order by id",
+    "input_schema": {"type": "object", "properties": {"order_id": {"type": "string"}}},
+}
 
 # ------------------------------------------------------------------
 # EvalCase / EvalSet
@@ -96,6 +106,206 @@ def test_eval_set_load_reads_plain_json_shape(tmp_path) -> None:
     evalset = EvalSet.load(path)
     assert evalset.id == "support-tier1-v1"
     assert evalset.cases == [EvalCase(id="c1", prompt="hi", expected="hi", grader=GraderKind.EXACT)]
+
+
+# ------------------------------------------------------------------
+# EvalCase tool_trace fields (GraderKind.TOOL_TRACE): validation matrix
+# ------------------------------------------------------------------
+
+
+def test_eval_case_tools_and_expected_tools_default_to_none() -> None:
+    case = EvalCase(id="c1", prompt="hello")
+    assert case.tools is None
+    assert case.expected_tools is None
+
+
+def test_eval_case_tool_trace_round_trip_dict() -> None:
+    case = EvalCase(
+        id="c1",
+        prompt="handle it",
+        grader=GraderKind.TOOL_TRACE,
+        tools=[_A_TOOL],
+        expected_tools=["lookup_order"],
+    )
+    restored = EvalCase.from_dict(case.to_dict())
+    assert restored == case
+
+
+def test_eval_case_tool_trace_legal_empty_expected_tools() -> None:
+    """An empty expected_tools is legal: it means the model is expected to
+    call no tools at all for that case."""
+    case = EvalCase(
+        id="c1",
+        prompt="just say hi, no tools needed",
+        grader=GraderKind.TOOL_TRACE,
+        tools=[_A_TOOL],
+        expected_tools=[],
+    )
+    restored = EvalCase.from_dict(case.to_dict())
+    assert restored == case
+    assert restored.expected_tools == []
+
+
+def test_eval_case_tool_trace_requires_tools() -> None:
+    with pytest.raises(ValueError, match=r"requires the field 'tools'"):
+        EvalCase.from_dict(
+            {"id": "c1", "prompt": "p", "grader": "tool_trace", "expected_tools": ["a"]}
+        )
+
+
+def test_eval_case_tool_trace_tools_must_not_be_empty() -> None:
+    with pytest.raises(ValueError, match=r"'tools' must not be empty"):
+        EvalCase.from_dict(
+            {
+                "id": "c1",
+                "prompt": "p",
+                "grader": "tool_trace",
+                "tools": [],
+                "expected_tools": ["a"],
+            }
+        )
+
+
+def test_eval_case_tool_trace_tools_must_be_a_list() -> None:
+    with pytest.raises(ValueError, match=r"'tools' must be a list"):
+        EvalCase.from_dict(
+            {
+                "id": "c1",
+                "prompt": "p",
+                "grader": "tool_trace",
+                "tools": "not-a-list",
+                "expected_tools": ["a"],
+            }
+        )
+
+
+def test_eval_case_tool_trace_tools_item_must_be_an_object() -> None:
+    with pytest.raises(ValueError, match=r"'tools'\[0\] must be an object"):
+        EvalCase.from_dict(
+            {
+                "id": "c1",
+                "prompt": "p",
+                "grader": "tool_trace",
+                "tools": ["not-a-dict"],
+                "expected_tools": ["a"],
+            }
+        )
+
+
+def test_eval_case_tool_trace_requires_expected_tools() -> None:
+    with pytest.raises(ValueError, match=r"requires the field 'expected_tools'"):
+        EvalCase.from_dict({"id": "c1", "prompt": "p", "grader": "tool_trace", "tools": [_A_TOOL]})
+
+
+def test_eval_case_tool_trace_expected_tools_must_be_a_list() -> None:
+    with pytest.raises(ValueError, match=r"'expected_tools' must be a list"):
+        EvalCase.from_dict(
+            {
+                "id": "c1",
+                "prompt": "p",
+                "grader": "tool_trace",
+                "tools": [_A_TOOL],
+                "expected_tools": "lookup_order",
+            }
+        )
+
+
+def test_eval_case_tool_trace_expected_tools_item_must_be_a_string() -> None:
+    with pytest.raises(ValueError, match=r"'expected_tools'\[0\] must be a non-empty string"):
+        EvalCase.from_dict(
+            {
+                "id": "c1",
+                "prompt": "p",
+                "grader": "tool_trace",
+                "tools": [_A_TOOL],
+                "expected_tools": [123],
+            }
+        )
+
+
+def test_eval_case_tool_trace_expected_tools_item_must_not_be_an_empty_string() -> None:
+    with pytest.raises(ValueError, match=r"'expected_tools'\[0\] must be a non-empty string"):
+        EvalCase.from_dict(
+            {
+                "id": "c1",
+                "prompt": "p",
+                "grader": "tool_trace",
+                "tools": [_A_TOOL],
+                "expected_tools": [""],
+            }
+        )
+
+
+def test_eval_case_tool_trace_expected_tools_second_item_is_named_by_index() -> None:
+    with pytest.raises(ValueError, match=r"'expected_tools'\[1\] must be a non-empty string"):
+        EvalCase.from_dict(
+            {
+                "id": "c1",
+                "prompt": "p",
+                "grader": "tool_trace",
+                "tools": [_A_TOOL],
+                "expected_tools": ["ok", ""],
+            }
+        )
+
+
+def test_eval_case_tools_field_on_non_tool_trace_grader_is_an_error() -> None:
+    with pytest.raises(ValueError, match=r"'tools' is only valid with grader tool_trace"):
+        EvalCase.from_dict({"id": "c1", "prompt": "p", "tools": [_A_TOOL]})
+
+
+def test_eval_case_expected_tools_field_on_non_tool_trace_grader_is_an_error() -> None:
+    with pytest.raises(ValueError, match=r"'expected_tools' is only valid with grader tool_trace"):
+        EvalCase.from_dict({"id": "c1", "prompt": "p", "expected_tools": ["a"]})
+
+
+def test_eval_case_tools_field_on_explicit_exact_grader_is_also_an_error() -> None:
+    """The 'wrong kind' check applies to every non-tool_trace grader, not
+    just the implicit default -- pin it against an explicitly-named one."""
+    with pytest.raises(ValueError, match=r"'tools' is only valid with grader tool_trace"):
+        EvalCase.from_dict(
+            {"id": "c1", "prompt": "p", "grader": "regex", "expected": "x", "tools": [_A_TOOL]}
+        )
+
+
+def test_eval_set_save_and_load_round_trips_a_tool_trace_case(tmp_path) -> None:
+    evalset = EvalSet(
+        id="s1",
+        cases=[
+            EvalCase(
+                id="c1",
+                prompt="handle it",
+                grader=GraderKind.TOOL_TRACE,
+                tools=[_A_TOOL],
+                expected_tools=["lookup_order"],
+            )
+        ],
+    )
+    path = tmp_path / "evalset.json"
+    evalset.save(path)
+    loaded = EvalSet.load(path)
+    assert loaded == evalset
+
+
+# ------------------------------------------------------------------
+# Completion
+# ------------------------------------------------------------------
+
+
+def test_completion_fields() -> None:
+    completion = Completion(
+        text="hi there", tool_names=["lookup_order", "issue_refund"], tokens=42, cost_usd=0.001
+    )
+    assert completion.text == "hi there"
+    assert completion.tool_names == ["lookup_order", "issue_refund"]
+    assert completion.tokens == 42
+    assert completion.cost_usd == pytest.approx(0.001)
+
+
+def test_completion_is_frozen() -> None:
+    completion = Completion(text="hi", tool_names=[], tokens=0, cost_usd=0.0)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        completion.text = "changed"
 
 
 # ------------------------------------------------------------------

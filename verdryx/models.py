@@ -48,6 +48,7 @@ class GraderKind(StrEnum):
     REGEX = "regex"
     OUTCOME_TAG = "outcome_tag"
     LLM_JUDGE = "llm_judge"
+    TOOL_TRACE = "tool_trace"
 
 
 @dataclass
@@ -68,6 +69,14 @@ class EvalCase:
             this is a pattern, not a literal string.
         rubric: Grading instructions for LLMJudgeGrader.
         grader: Which GraderKind grades this case. Defaults to EXACT.
+        tools: Provider-shape tool definitions passed to the adapter
+            verbatim, for GraderKind.TOOL_TRACE cases (see
+            LLMAdapter.complete_with_tools in graders.py). Required
+            (non-empty) for tool_trace cases; an error on any other grader.
+        expected_tools: Ordered expected tool NAMES for GraderKind.TOOL_TRACE
+            cases (see ToolTraceGrader in graders.py). An empty list is
+            legal and means the model is expected to call no tools at all.
+            Required for tool_trace cases; an error on any other grader.
     """
 
     id: str
@@ -75,6 +84,8 @@ class EvalCase:
     expected: str | None = None
     rubric: str | None = None
     grader: GraderKind = GraderKind.EXACT
+    tools: list[dict[str, object]] | None = None
+    expected_tools: list[str] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvalCase:
@@ -87,12 +98,40 @@ class EvalCase:
         except ValueError:
             allowed = ", ".join(g.value for g in GraderKind)
             raise ValueError(f"field 'grader': {raw_grader!r} is not one of {allowed}") from None
+
+        tools = data.get("tools")
+        expected_tools = data.get("expected_tools")
+        if grader == GraderKind.TOOL_TRACE:
+            if "tools" not in data:
+                raise ValueError("grader 'tool_trace' requires the field 'tools'")
+            if not isinstance(tools, list):
+                raise ValueError("field 'tools' must be a list")
+            if not tools:
+                raise ValueError("field 'tools' must not be empty for grader 'tool_trace'")
+            for i, tool in enumerate(tools):
+                if not isinstance(tool, dict):
+                    raise ValueError(f"field 'tools'[{i}] must be an object")
+            if "expected_tools" not in data:
+                raise ValueError("grader 'tool_trace' requires the field 'expected_tools'")
+            if not isinstance(expected_tools, list):
+                raise ValueError("field 'expected_tools' must be a list")
+            for i, name in enumerate(expected_tools):
+                if not isinstance(name, str) or not name:
+                    raise ValueError(f"field 'expected_tools'[{i}] must be a non-empty string")
+        else:
+            if tools is not None:
+                raise ValueError("field 'tools' is only valid with grader tool_trace")
+            if expected_tools is not None:
+                raise ValueError("field 'expected_tools' is only valid with grader tool_trace")
+
         return cls(
             id=data["id"],
             prompt=data["prompt"],
             expected=data.get("expected"),
             rubric=data.get("rubric"),
             grader=grader,
+            tools=tools,
+            expected_tools=expected_tools,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,6 +140,10 @@ class EvalCase:
             d["expected"] = self.expected
         if self.rubric is not None:
             d["rubric"] = self.rubric
+        if self.tools is not None:
+            d["tools"] = self.tools
+        if self.expected_tools is not None:
+            d["expected_tools"] = self.expected_tools
         return d
 
 
@@ -157,6 +200,27 @@ class EvalSet:
 
     def save(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.to_dict(), indent=2) + "\n", encoding="utf-8")
+
+
+@dataclass(frozen=True)
+class Completion:
+    """The parsed result of one model response, including the ordered
+    tool_use names.
+
+    Produced by LLMAdapter.complete_with_tools() (see graders.py) for a
+    GraderKind.TOOL_TRACE case's single-turn model call: `text` is every
+    text content block concatenated in order (may be empty when the
+    response is tool_use blocks only), `tool_names` is the ordered list of
+    tool_use block names the model chose (empty if it called no tools), and
+    `tokens`/`cost_usd` mirror LLMAdapter.complete()'s own accounting so
+    verdryx.cli's eval loop can fold them into Score exactly the way it
+    already does for complete().
+    """
+
+    text: str
+    tool_names: list[str]
+    tokens: int
+    cost_usd: float
 
 
 @dataclass

@@ -23,10 +23,24 @@ from verdryx.graders import (
     OutcomeTagGrader,
     RegexGrader,
     StubLLMAdapter,
+    ToolTraceGrader,
     build_graders,
 )
-from verdryx.models import DEFAULT_OUTCOME_SCORES, EvalCase, GraderKind
+from verdryx.models import DEFAULT_OUTCOME_SCORES, Completion, EvalCase, GraderKind
 from verdryx.pricing import ModelPrice, PriceBook
+
+#: A minimal, provider-shape tool definition, reused across the
+#: ToolTraceGrader / complete_with_tools tests below.
+_WEATHER_TOOL = {
+    "name": "get_weather",
+    "description": "Get current weather for a location",
+    "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}},
+}
+_TIME_TOOL = {
+    "name": "get_time",
+    "description": "Get the current time for a location",
+    "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}},
+}
 
 # ------------------------------------------------------------------
 # ExactGrader
@@ -140,6 +154,111 @@ def test_outcome_tag_grader_default_mapping_is_a_copy_not_shared_reference() -> 
 
 
 # ------------------------------------------------------------------
+# ToolTraceGrader -- deterministic, dependency-free, no LLM call of its own
+# ------------------------------------------------------------------
+
+
+def _tool_trace_case(expected_tools: list[str]) -> EvalCase:
+    return EvalCase(
+        id="c1",
+        prompt="handle it",
+        grader=GraderKind.TOOL_TRACE,
+        tools=[_WEATHER_TOOL, _TIME_TOOL],
+        expected_tools=expected_tools,
+    )
+
+
+def _completion(tool_names: list[str]) -> Completion:
+    return Completion(text="", tool_names=tool_names, tokens=0, cost_usd=0.0)
+
+
+def test_tool_trace_grader_exact_ordered_match_scores_one() -> None:
+    grader = ToolTraceGrader()
+    case = _tool_trace_case(["get_weather", "get_time"])
+    result = grader.grade_trace(case, _completion(["get_weather", "get_time"]))
+    assert result.value == 1.0
+
+
+def test_tool_trace_grader_both_empty_scores_one() -> None:
+    """The model correctly called no tools at all."""
+    grader = ToolTraceGrader()
+    case = _tool_trace_case([])
+    result = grader.grade_trace(case, _completion([]))
+    assert result.value == 1.0
+
+
+def test_tool_trace_grader_order_swap_scores_partial_credit() -> None:
+    grader = ToolTraceGrader()
+    case = _tool_trace_case(["get_weather", "get_time"])
+    # LCS(["get_time", "get_weather"], ["get_weather", "get_time"]) == 1
+    # (either name alone, in order), longest == 2 -> 0.5.
+    result = grader.grade_trace(case, _completion(["get_time", "get_weather"]))
+    assert result.value == pytest.approx(0.5)
+
+
+def test_tool_trace_grader_missing_call_scores_partial_credit() -> None:
+    grader = ToolTraceGrader()
+    case = _tool_trace_case(["get_weather", "get_time"])
+    # Only the first expected call was made: LCS == 1, longest == 2 -> 0.5.
+    result = grader.grade_trace(case, _completion(["get_weather"]))
+    assert result.value == pytest.approx(0.5)
+
+
+def test_tool_trace_grader_extra_call_scores_partial_credit() -> None:
+    grader = ToolTraceGrader()
+    case = _tool_trace_case(["get_weather"])
+    # An unexpected extra call after the correct one: LCS == 1, longest == 2
+    # -> 0.5, not a full match and not a zero either.
+    result = grader.grade_trace(case, _completion(["get_weather", "get_time"]))
+    assert result.value == pytest.approx(0.5)
+
+
+def test_tool_trace_grader_expected_empty_but_calls_made_scores_zero() -> None:
+    """expected_tools == [] means "call nothing"; any call at all is a
+    complete miss against that expectation (LCS with an empty sequence is
+    always 0)."""
+    grader = ToolTraceGrader()
+    case = _tool_trace_case([])
+    result = grader.grade_trace(case, _completion(["get_weather"]))
+    assert result.value == 0.0
+
+
+def test_tool_trace_grader_completely_disjoint_trace_scores_zero() -> None:
+    grader = ToolTraceGrader()
+    case = _tool_trace_case(["get_weather"])
+    result = grader.grade_trace(case, _completion(["get_time"]))
+    assert result.value == 0.0
+
+
+def test_tool_trace_grader_partial_credit_is_strictly_between_zero_and_one() -> None:
+    grader = ToolTraceGrader()
+    case = _tool_trace_case(["get_weather", "get_time"])
+    result = grader.grade_trace(case, _completion(["get_weather"]))
+    assert 0.0 < result.value < 1.0
+
+
+def test_tool_trace_grader_result_carries_no_tokens_or_cost_of_its_own() -> None:
+    """GradeResult fields stay at their zero defaults -- the completion's
+    own tokens/cost_usd are folded in by the eval runner (verdryx.cli),
+    exactly like every other grader's GradeResult."""
+    grader = ToolTraceGrader()
+    case = _tool_trace_case(["get_weather"])
+    result = grader.grade_trace(case, _completion(["get_weather"]))
+    assert result.tokens == 0
+    assert result.cost_usd == 0.0
+
+
+def test_tool_trace_grader_treats_none_expected_tools_as_empty() -> None:
+    """Defensive: an EvalCase constructed directly (bypassing
+    EvalCase.from_dict's validation) with expected_tools left at its None
+    default is graded as if expected_tools were []."""
+    grader = ToolTraceGrader()
+    case = EvalCase(id="c1", prompt="p", grader=GraderKind.TOOL_TRACE, tools=[_WEATHER_TOOL])
+    result = grader.grade_trace(case, _completion([]))
+    assert result.value == 1.0
+
+
+# ------------------------------------------------------------------
 # LLMJudgeGrader + StubLLMAdapter
 # ------------------------------------------------------------------
 
@@ -168,6 +287,67 @@ def test_stub_llm_adapter_judge_reports_injected_cost_usd() -> None:
 
 def test_stub_llm_adapter_satisfies_llm_adapter_protocol() -> None:
     assert isinstance(StubLLMAdapter(), LLMAdapter)
+
+
+# ------------------------------------------------------------------
+# StubLLMAdapter.complete_with_tools -- deterministic, no I/O
+# ------------------------------------------------------------------
+
+
+def test_stub_llm_adapter_complete_with_tools_defaults_to_first_tool_name() -> None:
+    adapter = StubLLMAdapter()
+    completion = adapter.complete_with_tools("p", [_WEATHER_TOOL, _TIME_TOOL])
+    assert completion.tool_names == ["get_weather"]
+    assert completion.text == "stub"
+
+
+def test_stub_llm_adapter_complete_with_tools_returns_empty_when_no_tools_given() -> None:
+    adapter = StubLLMAdapter()
+    completion = adapter.complete_with_tools("p", [])
+    assert completion.tool_names == []
+
+
+def test_stub_llm_adapter_complete_with_tools_configurable_tool_names_to_return() -> None:
+    adapter = StubLLMAdapter(tool_names_to_return=["get_time", "get_weather"])
+    completion = adapter.complete_with_tools("p", [_WEATHER_TOOL, _TIME_TOOL])
+    assert completion.tool_names == ["get_time", "get_weather"]
+
+
+def test_stub_llm_adapter_complete_with_tools_configurable_empty_list_is_respected() -> None:
+    """An explicit empty list overrides the default first-tool-name
+    behavior, distinguishing "configured to call nothing" from "no
+    tool_names_to_return configured"."""
+    adapter = StubLLMAdapter(tool_names_to_return=[])
+    completion = adapter.complete_with_tools("p", [_WEATHER_TOOL])
+    assert completion.tool_names == []
+
+
+def test_stub_llm_adapter_complete_with_tools_is_deterministic_across_calls() -> None:
+    adapter = StubLLMAdapter()
+    first = adapter.complete_with_tools("p", [_WEATHER_TOOL])
+    second = adapter.complete_with_tools("p", [_WEATHER_TOOL])
+    assert first == second
+
+
+def test_stub_llm_adapter_complete_with_tools_records_calls() -> None:
+    adapter = StubLLMAdapter()
+    adapter.complete_with_tools("some prompt", [_WEATHER_TOOL])
+    assert adapter.tool_completions == [("some prompt", [_WEATHER_TOOL])]
+
+
+def test_stub_llm_adapter_complete_with_tools_uses_tokens_constant() -> None:
+    adapter = StubLLMAdapter(tokens=99)
+    completion = adapter.complete_with_tools("p", [_WEATHER_TOOL])
+    assert completion.tokens == 99
+
+
+def test_stub_llm_adapter_complete_with_tools_cost_usd_is_always_zero() -> None:
+    """Mirrors complete()'s own no-real-billed-call contract: cost_usd stays
+    0.0 regardless of the cost_usd constructor arg, which feeds judge()
+    only."""
+    adapter = StubLLMAdapter(cost_usd=5.0)
+    completion = adapter.complete_with_tools("p", [_WEATHER_TOOL])
+    assert completion.cost_usd == 0.0
 
 
 def test_llm_judge_grader_uses_stub_adapter_no_network() -> None:
@@ -373,6 +553,128 @@ def test_anthropic_adapter_judge_survives_non_numeric_response() -> None:
 
 
 # ------------------------------------------------------------------
+# AnthropicAdapter -- complete_with_tools() response parsing
+# ------------------------------------------------------------------
+
+
+def test_anthropic_adapter_complete_with_tools_passes_tools_through() -> None:
+    adapter = AnthropicAdapter()
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="")],
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        adapter.complete_with_tools("what's the weather?", [_WEATHER_TOOL, _TIME_TOOL])
+    assert mock_client.messages.create.call_args.kwargs["tools"] == [_WEATHER_TOOL, _TIME_TOOL]
+    assert mock_client.messages.create.call_args.kwargs["messages"] == [
+        {"role": "user", "content": "what's the weather?"}
+    ]
+
+
+def test_anthropic_adapter_complete_with_tools_extracts_ordered_tool_names() -> None:
+    """A fabricated multi-block response (text, then two tool_use blocks,
+    in that order) -- the real shape an Anthropic Messages API response
+    takes when the model narrates before calling tools."""
+    adapter = AnthropicAdapter()
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[
+            SimpleNamespace(type="text", text="Let me check that for you."),
+            SimpleNamespace(
+                type="tool_use", id="toolu_1", name="get_weather", input={"location": "Paris"}
+            ),
+            SimpleNamespace(
+                type="tool_use", id="toolu_2", name="get_time", input={"location": "Paris"}
+            ),
+        ],
+        usage=SimpleNamespace(input_tokens=20, output_tokens=15),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        completion = adapter.complete_with_tools("what's the weather?", [_WEATHER_TOOL, _TIME_TOOL])
+    assert completion.text == "Let me check that for you."
+    assert completion.tool_names == ["get_weather", "get_time"]
+    assert completion.tokens == 35
+
+
+def test_anthropic_adapter_complete_with_tools_concatenates_multiple_text_blocks_in_order() -> None:
+    adapter = AnthropicAdapter()
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[
+            SimpleNamespace(type="text", text="Part one. "),
+            SimpleNamespace(type="text", text="Part two."),
+        ],
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        completion = adapter.complete_with_tools("p", [_WEATHER_TOOL])
+    assert completion.text == "Part one. Part two."
+    assert completion.tool_names == []
+
+
+def test_anthropic_adapter_complete_with_tools_survives_no_tool_use_blocks() -> None:
+    """A response with no tool_use blocks at all (the model chose not to
+    call anything) yields an empty tool_names, not an error."""
+    adapter = AnthropicAdapter()
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="No tool needed here.")],
+        usage=SimpleNamespace(input_tokens=5, output_tokens=5),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        completion = adapter.complete_with_tools("p", [_WEATHER_TOOL])
+    assert completion.tool_names == []
+    assert completion.text == "No tool needed here."
+
+
+def test_anthropic_adapter_complete_with_tools_survives_empty_response() -> None:
+    adapter = AnthropicAdapter()
+    mock_client = MagicMock()
+    response = SimpleNamespace(content=[], usage=SimpleNamespace(input_tokens=1, output_tokens=0))
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        completion = adapter.complete_with_tools("p", [_WEATHER_TOOL])
+    assert completion.text == ""
+    assert completion.tool_names == []
+
+
+def test_anthropic_adapter_complete_with_tools_prices_known_model_via_default_price_book() -> None:
+    """Mirrors complete()'s and judge()'s own pricing tests: the default
+    model (claude-haiku-4-5-20251001) is an exact PriceBook.default() entry
+    at $1.00 / $5.00 per Mtok input/output."""
+    adapter = AnthropicAdapter()
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="tool_use", id="t1", name="get_weather", input={})],
+        usage=SimpleNamespace(input_tokens=10, output_tokens=1),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        completion = adapter.complete_with_tools("p", [_WEATHER_TOOL])
+    # 10 * 1.00/1e6 + 1 * 5.00/1e6 = 0.00001 + 0.000005 = 0.000015
+    assert completion.cost_usd == pytest.approx(0.000015)
+
+
+def test_anthropic_adapter_complete_with_tools_uses_injected_price_book() -> None:
+    custom_book = PriceBook().with_price("weird-model", ModelPrice(1.0, 1.0))
+    adapter = AnthropicAdapter(model="weird-model", price_book=custom_book)
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="hi")],
+        usage=SimpleNamespace(input_tokens=1_000_000, output_tokens=0),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        completion = adapter.complete_with_tools("p", [_WEATHER_TOOL])
+    assert completion.cost_usd == pytest.approx(1.0)
+
+
+# ------------------------------------------------------------------
 # AnthropicAdapter -- judge() cost_usd via PriceBook (the LLM judge path
 # that previously left Score.cost_usd hardcoded at 0.0)
 # ------------------------------------------------------------------
@@ -497,7 +799,15 @@ def test_build_graders_covers_deterministic_kinds_without_adapter() -> None:
     assert GraderKind.EXACT in graders
     assert GraderKind.REGEX in graders
     assert GraderKind.OUTCOME_TAG in graders
+    assert GraderKind.TOOL_TRACE in graders
     assert GraderKind.LLM_JUDGE not in graders
+
+
+def test_build_graders_registers_tool_trace_grader_unconditionally() -> None:
+    """Unlike LLMJudgeGrader, ToolTraceGrader needs no adapter -- it is
+    present even when build_graders() is called with no arguments at all."""
+    graders = build_graders()
+    assert isinstance(graders[GraderKind.TOOL_TRACE], ToolTraceGrader)
 
 
 def test_build_graders_adds_llm_judge_when_adapter_given() -> None:

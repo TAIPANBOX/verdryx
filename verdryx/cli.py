@@ -40,6 +40,7 @@ from verdryx.graders import (
     Grader,
     LLMAdapter,
     StubLLMAdapter,
+    ToolTraceGrader,
     build_graders,
 )
 from verdryx.models import Baseline, EvalRun, EvalSet, GraderKind, Score
@@ -88,19 +89,28 @@ def run_eval(
     adapter: LLMAdapter,
     *,
     model: str,
-    graders: dict[GraderKind, Grader] | None = None,
+    graders: dict[GraderKind, Grader | ToolTraceGrader] | None = None,
 ) -> EvalRun:
     """Grade every case in `evalset` and return the resulting EvalRun.
 
     For GraderKind.OUTCOME_TAG cases, case.prompt is treated as the raw
     outcome tag to grade (no model call: see EvalCase's docstring in
-    models.py). Every other case calls adapter.complete(case.prompt) first
-    to produce the output that gets graded; that call's own cost_usd (real,
-    billed usage for the model under evaluation, priced by AnthropicAdapter
-    via the same PriceBook judge() uses -- see graders.py) is folded into
-    Score.cost_usd alongside whatever the grader itself reports, so
-    EvalRun.total_cost_usd reflects the run's full spend, not just an
-    LLM_JUDGE grader's judge-call cost.
+    models.py). For GraderKind.TOOL_TRACE cases, adapter.complete_with_tools
+    (case.prompt, case.tools) replaces the usual adapter.complete() call: it
+    returns a Completion (models.py) carrying the model's own ordered
+    tool_use names alongside its tokens/cost_usd, which the tool-trace
+    grader's grade_trace() (graders.py's ToolTraceGrader) scores against
+    case.expected_tools; an adapter that does not implement
+    complete_with_tools (e.g. a hand-rolled third-party LLMAdapter) dies
+    with a clear message naming the adapter and the missing method, rather
+    than failing deep in the loop with an opaque AttributeError. Every
+    other case calls adapter.complete(case.prompt) first to produce the
+    output that gets graded; that call's own cost_usd (real, billed usage
+    for the model under evaluation, priced by AnthropicAdapter via the same
+    PriceBook judge() uses -- see graders.py) is folded into Score.cost_usd
+    alongside whatever the grader itself reports, so EvalRun.total_cost_usd
+    reflects the run's full spend, not just an LLM_JUDGE grader's
+    judge-call cost.
     """
     graders = graders if graders is not None else build_graders(judge_adapter=adapter)
     run_id = str(uuid.uuid4())
@@ -113,6 +123,29 @@ def run_eval(
             raise ValueError(
                 f"no grader configured for kind {case.grader.value!r} (case_id={case.id!r})"
             )
+        if case.grader == GraderKind.TOOL_TRACE:
+            if not isinstance(grader, ToolTraceGrader):
+                raise ValueError(
+                    f"grader configured for kind 'tool_trace' is not a ToolTraceGrader "
+                    f"(case_id={case.id!r})"
+                )
+            if not hasattr(adapter, "complete_with_tools"):
+                _die(
+                    f"adapter {type(adapter).__name__!r} has no complete_with_tools() method; "
+                    "grading a GraderKind.TOOL_TRACE case requires an LLMAdapter that "
+                    f"implements it (case_id={case.id!r})"
+                )
+            completion = adapter.complete_with_tools(case.prompt, case.tools or [])
+            result = grader.grade_trace(case, completion)
+            scores.append(
+                Score(
+                    case_id=case.id,
+                    value=result.value,
+                    tokens=completion.tokens + result.tokens,
+                    cost_usd=completion.cost_usd + result.cost_usd,
+                )
+            )
+            continue
         if case.grader == GraderKind.OUTCOME_TAG:
             output, completion_tokens, completion_cost_usd = case.prompt, 0, 0.0
         else:
