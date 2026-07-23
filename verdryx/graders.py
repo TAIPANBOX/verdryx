@@ -381,6 +381,12 @@ class AnthropicAdapter:
             ported number-for-number; see verdryx.pricing). Inject a custom
             one to price a model TokenFuse doesn't list, or to test pricing
             without depending on the real table.
+        temperature: Sampling temperature forwarded with every complete(),
+            judge(), and complete_with_tools() request. None (the default)
+            omits the parameter entirely: newest-generation Claude models
+            reject a request that sets a non-default temperature with a
+            400, so pinning a value (e.g. 0.0 for lower-variance judging)
+            is only safe on models that still accept it.
     """
 
     def __init__(
@@ -389,12 +395,14 @@ class AnthropicAdapter:
         base_url: str | None = None,
         api_key: str | None = None,
         price_book: PriceBook | None = None,
+        temperature: float | None = None,
     ) -> None:
         self.model_name = model
         self._base_url = base_url
         self._api_key = api_key
         self._client: Any = None
         self._price_book = price_book if price_book is not None else PriceBook.default()
+        self._temperature = temperature
 
     def _get_client(self) -> Any:
         try:
@@ -412,12 +420,15 @@ class AnthropicAdapter:
             self._client = anthropic.Anthropic(**kwargs)
         return self._client
 
+    def _sampling_kwargs(self) -> dict[str, Any]:
+        return {} if self._temperature is None else {"temperature": self._temperature}
+
     def complete(self, prompt: str) -> tuple[str, int, float]:
         client = self._get_client()
         response = client.messages.create(
             model=self.model_name,
             max_tokens=1024,
-            temperature=0.0,
+            **self._sampling_kwargs(),
             messages=[{"role": "user", "content": prompt}],
         )
         input_tokens = response.usage.input_tokens
@@ -430,7 +441,7 @@ class AnthropicAdapter:
         response = client.messages.create(
             model=self.model_name,
             max_tokens=16,
-            temperature=0.0,
+            **self._sampling_kwargs(),
             system=_JUDGE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": _build_judge_message(prompt, output, rubric)}],
         )
@@ -445,7 +456,7 @@ class AnthropicAdapter:
         response = client.messages.create(
             model=self.model_name,
             max_tokens=1024,
-            temperature=0.0,
+            **self._sampling_kwargs(),
             tools=tools,
             messages=[{"role": "user", "content": prompt}],
         )

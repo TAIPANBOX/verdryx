@@ -482,6 +482,48 @@ def test_anthropic_adapter_client_is_cached() -> None:
 
 
 # ------------------------------------------------------------------
+# AnthropicAdapter -- request shape (temperature forwarding)
+# ------------------------------------------------------------------
+
+
+def _run_all_three_calls(adapter: AnthropicAdapter) -> MagicMock:
+    """Drive complete(), judge(), and complete_with_tools() against one
+    mocked client and hand back the client for request-shape assertions.
+    The single response works for all three parsers: complete() and
+    judge() read the first text block, complete_with_tools()
+    discriminates on block type."""
+    mock_client = MagicMock()
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="0.5")],
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    mock_client.messages.create.return_value = response
+    with patch.object(adapter, "_get_client", return_value=mock_client):
+        adapter.complete("hi")
+        adapter.judge("prompt", "output", "rubric")
+        adapter.complete_with_tools("hi", [_WEATHER_TOOL])
+    assert mock_client.messages.create.call_count == 3
+    return mock_client
+
+
+def test_anthropic_adapter_temperature_omitted_by_default() -> None:
+    """None (the default) must leave temperature out of every request:
+    newest-generation Claude models reject a non-default temperature
+    with a 400, and the three call sites must stay in lockstep."""
+    mock_client = _run_all_three_calls(AnthropicAdapter())
+    for call in mock_client.messages.create.call_args_list:
+        assert "temperature" not in call.kwargs
+
+
+def test_anthropic_adapter_explicit_temperature_forwarded_to_every_call() -> None:
+    """0.0 specifically: a falsy value must still be forwarded (the
+    omit-check is `is None`, not truthiness)."""
+    mock_client = _run_all_three_calls(AnthropicAdapter(temperature=0.0))
+    for call in mock_client.messages.create.call_args_list:
+        assert call.kwargs["temperature"] == 0.0
+
+
+# ------------------------------------------------------------------
 # AnthropicAdapter -- complete() / judge() response parsing
 # ------------------------------------------------------------------
 
