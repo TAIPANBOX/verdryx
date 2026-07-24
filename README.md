@@ -373,7 +373,9 @@ logged and swallowed, never raised into the caller's eval/drift call), and
 an event is **skipped** (counted in `EventLog.skipped_empty_agent_id`)
 whenever `agent_id` is empty; Verdryx never fabricates one. Pass
 `--agent-id agent://your-org.example/...` to `eval`/`drift` to identify
-which agent's output is being measured.
+which agent's output is being measured. Each event also carries a SPEC.md
+Sec 6.5 `prev_hash` chain (one file, one chain, resumed across restarts);
+verify with `agent-conform -chain <file>`.
 
 ---
 
