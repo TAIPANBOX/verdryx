@@ -18,7 +18,7 @@ from typing import Any
 import jsonschema
 import pytest
 
-from verdryx.events import EventLog, resolve_events_path
+from verdryx.events import EventLog, canonicalize, chain_hash, resolve_events_path
 
 
 def _read_ndjson(path: Path) -> list[dict[str, Any]]:
@@ -177,3 +177,130 @@ def test_bad_agent_id_pattern_is_rejected_by_schema(tmp_path, event_schema) -> N
     event = _read_ndjson(events_path)[0]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(instance=event, schema=event_schema)
+
+
+# ------------------------------------------------------------------
+# prev_hash chain (SPEC.md Sec 6.5)
+# ------------------------------------------------------------------
+
+# Cross-language pinned vectors: agent-stack-go/event/testdata/chain-vectors.json
+# is the normative cross-language truth (Go: event.Canonicalize/ChainHash; Rust:
+# tokenfuse's agent-event exporter; here: canonicalize/chain_hash). Every
+# implementation MUST reproduce these byte-for-byte. The vector events carry
+# envelope keys (on_behalf_of, run_id) that verdryx's own emit() never sets
+# itself -- canonicalize/chain_hash operate on plain dicts, so that is fine.
+
+_VEC_EVENT_1 = {
+    "schema": "taipanbox.dev/agent-event/v0.2",
+    "ts": "2026-07-24T12:00:00Z",
+    "source": "wardryx",
+    "type": "policy_deny",
+    "agent_id": "agent://acme.example/support/tier1-bot",
+    "severity": "high",
+    "run_id": "run-0001",
+    "data": {"policy": "finance-guard", "reason": "deny_tool: shell"},
+}
+_VEC_CANONICAL_1 = (
+    '{"agent_id":"agent://acme.example/support/tier1-bot","data":{"policy":"finance-guard",'
+    '"reason":"deny_tool: shell"},"run_id":"run-0001","schema":"taipanbox.dev/agent-event/v0.2",'
+    '"severity":"high","source":"wardryx","ts":"2026-07-24T12:00:00Z","type":"policy_deny"}'
+)
+_VEC_HASH_1 = "sha256:b43502c0ed6893238f2635be7a909cde89df1c2eecaef4d84871b83cf21cb31b"
+
+_VEC_EVENT_2 = {
+    "schema": "taipanbox.dev/agent-event/v0.2",
+    "ts": "2026-07-24T12:00:01Z",
+    "source": "tokenfuse",
+    "type": "budget_exhausted",
+    "agent_id": "agent://acme.example/support/tier1-bot",
+    "severity": "critical",
+    "run_id": "run-0001",
+    "on_behalf_of": ["user://acme.example/alice", "agent://acme.example/orchestrator"],
+    "data": {"budget_usd": 12.5, "n": 3, "note": "обмеження діє", "nested": {"b": 2, "a": 1}},
+}
+_VEC_CANONICAL_2 = (
+    '{"agent_id":"agent://acme.example/support/tier1-bot","data":{"budget_usd":12.5,"n":3,'
+    '"nested":{"a":1,"b":2},"note":"обмеження діє"},"on_behalf_of":["user://acme.example/alice",'
+    '"agent://acme.example/orchestrator"],"run_id":"run-0001",'
+    '"schema":"taipanbox.dev/agent-event/v0.2","severity":"critical","source":"tokenfuse",'
+    '"ts":"2026-07-24T12:00:01Z","type":"budget_exhausted"}'
+)
+_VEC_HASH_2 = "sha256:488f1017967bf9510c62d7c31b9d5a0086ff2000d90a7d4266f171a131430243"
+
+_VEC_EVENT_3 = {
+    "schema": "taipanbox.dev/agent-event/v0.2",
+    "ts": "2026-07-24T12:00:02Z",
+    "source": "qryx",
+    "type": "evidence_signed",
+    "agent_id": "agent://acme.example/support/tier1-bot",
+    "severity": "info",
+    "data": {"algo": "ML-DSA-87"},
+}
+_VEC_CANONICAL_3 = (
+    '{"agent_id":"agent://acme.example/support/tier1-bot","data":{"algo":"ML-DSA-87"},'
+    '"schema":"taipanbox.dev/agent-event/v0.2","severity":"info","source":"qryx",'
+    '"ts":"2026-07-24T12:00:02Z","type":"evidence_signed"}'
+)
+_VEC_HASH_3 = "sha256:998cbc146b07e115318ce378e0579fcd1927066ef4316900ec7d66ba157e7c4b"
+
+
+@pytest.mark.parametrize(
+    "event,canonical,expected_hash",
+    [
+        (_VEC_EVENT_1, _VEC_CANONICAL_1, _VEC_HASH_1),
+        (_VEC_EVENT_2, _VEC_CANONICAL_2, _VEC_HASH_2),
+        (_VEC_EVENT_3, _VEC_CANONICAL_3, _VEC_HASH_3),
+    ],
+)
+def test_canonicalize_and_chain_hash_match_pinned_vectors(
+    event: dict[str, Any], canonical: str, expected_hash: str
+) -> None:
+    """verdryx.events.canonicalize/chain_hash MUST reproduce the
+    cross-language vectors byte-for-byte."""
+    assert canonicalize(event) == canonical.encode("utf-8")
+    assert chain_hash(event) == expected_hash
+
+
+def test_emit_chains_two_events(tmp_path, event_schema, agent_id) -> None:
+    events_path = tmp_path / "events.ndjson"
+    log = EventLog(events_path)
+    log.emit("eval_run", agent_id, {"a": 1})
+    log.emit("eval_run", agent_id, {"a": 2})
+
+    events = _read_ndjson(events_path)
+    assert len(events) == 2
+    assert "prev_hash" not in events[0]
+    assert events[1]["prev_hash"] == chain_hash(events[0])
+    for event in events:
+        jsonschema.validate(instance=event, schema=event_schema)
+
+
+def test_reopened_event_log_resumes_the_chain(tmp_path, agent_id) -> None:
+    """One file, one chain: a new EventLog over an existing file continues
+    the chain rather than restarting it (SPEC.md Sec 6.5)."""
+    events_path = tmp_path / "events.ndjson"
+    log = EventLog(events_path)
+    log.emit("eval_run", agent_id, {"a": 1})
+    log.emit("eval_run", agent_id, {"a": 2})
+
+    resumed = EventLog(events_path)
+    resumed.emit("eval_run", agent_id, {"a": 3})
+
+    events = _read_ndjson(events_path)
+    assert len(events) == 3
+    assert events[2]["prev_hash"] == chain_hash(events[1])
+
+
+def test_malformed_tail_starts_a_fresh_chain(tmp_path, agent_id) -> None:
+    """A tail that does not parse as JSON is exactly like no file at all:
+    EventLog starts a fresh chain rather than raising (fail-open)."""
+    events_path = tmp_path / "events.ndjson"
+    events_path.write_text("{not json at all\n")
+
+    log = EventLog(events_path)
+    log.emit("eval_run", agent_id, {"a": 1})
+
+    lines = [line for line in events_path.read_text().splitlines() if line.strip()]
+    assert len(lines) == 2
+    new_event = json.loads(lines[1])
+    assert "prev_hash" not in new_event
