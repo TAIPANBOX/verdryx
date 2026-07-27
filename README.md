@@ -74,6 +74,25 @@ cost $0.00025 for nothing - the gap a dollar total alone can't show.
 
 Full write-up and all numbers: [`VALIDATION.md`](VALIDATION.md).
 
+
+
+### Running it on a Kubernetes cluster
+
+The whole stack was deployed as a five-node k3s cluster on Hetzner, AWS and GCP
+between 25 and 27 July 2026 (six clusters, all destroyed afterwards). The
+manifests, the traps and the evidence are public in
+[stack-k8s](https://github.com/TAIPANBOX/stack-k8s). Verdryx is not a pod. The console **executes** it to read and run
+evaluations against `verdryx.db`, so the binary lives inside the console image
+rather than beside it, and the store takes an ordinary ReadWriteOnce volume.
+The practical consequence: there is no service to scale and no endpoint to
+guard, which is the correct shape for something that runs on a schedule rather
+than in a request path.
+
+To be clear about scope: those runs verified the deployment shape and the
+service coming up correctly on three clouds. They did not produce quality numbers: the quality plane was
+deliberately left unseeded on those clusters, so nothing about grading or
+drift was measured there and nothing is claimed.
+
 ---
 
 ## What it does
