@@ -24,6 +24,14 @@ escalated and abandoned case. This is entirely defensive, self-measurement
 tooling for the operator running the agents, not a red-teaming or
 offensive-security tool.
 
+<div align="center">
+
+<img src="assets/diagram.svg" alt="Verdryx architecture: TokenFuse Parquet traces, outcome exports and eval sets pass through four graders into the eval store, and out as drift reports, cost per resolved outcome and quality events" width="960">
+
+<sub>The same service as its room on <a href="https://it-rat.com/services/verdryx.html">it-rat.com</a> draws it, where the diagram sits next to a simulation you can scrub back and forth.</sub>
+
+</div>
+
 ---
 
 ## Where this fits in the stack

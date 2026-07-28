@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-18 -18 996 366" width="996" height="366" role="img" aria-label="Verdryx: outcomes judged and priced per resolved case, with drift watched over time">
+  <title>Verdryx: outcomes judged and priced per resolved case, with drift watched over time</title>
+  <rect x="-18" y="-18" width="996" height="366" rx="16" fill="#0A0E13"/>
+  <rect x="-17.5" y="-17.5" width="995" height="365" rx="15.5" fill="none" stroke="rgba(255,255,255,.09)"/>
+
+        <defs><marker id="a2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="#5A6675"/></marker></defs>
+        <g font-family="ui-monospace,Menlo" text-anchor="middle">
+          <rect x="16" y="40" width="168" height="46" rx="10" fill="#141C27" stroke="#2a3547"/>
+          <text x="100" y="63" fill="#E9EFF6" font-size="11" font-weight="700">tokenfuse Parquet</text>
+          <text x="100" y="77" fill="#8A97A6" font-size="10.5">trace dir</text>
+
+          <rect x="16" y="98" width="168" height="46" rx="10" fill="#141C27" stroke="#2a3547"/>
+          <text x="100" y="125" fill="#E9EFF6" font-size="11.5" font-weight="700">outcomes.ndjson</text>
+
+          <rect x="16" y="156" width="168" height="46" rx="10" fill="#141C27" stroke="#2a3547"/>
+          <text x="100" y="183" fill="#E9EFF6" font-size="11.5" font-weight="700">evalset.json</text>
+
+          <rect x="240" y="20" width="360" height="272" rx="16" fill="#10161F" stroke="#FF7AA2" stroke-width="1.4"><animate attributeName="stroke-opacity" values="1;.45;1" dur="3.4s" repeatCount="indefinite"/></rect>
+          <text x="420" y="48" fill="#FF7AA2" font-size="14" font-weight="700">verdryx core</text>
+
+          <text x="420" y="70" fill="#8A97A6" font-size="10">graders</text>
+          <g font-size="10" fill="#E9EFF6">
+            <rect x="260" y="78" width="76" height="28" rx="8" fill="#141C27" stroke="#2a3547"/><text x="298" y="96">exact</text>
+            <rect x="344" y="78" width="76" height="28" rx="8" fill="#141C27" stroke="#2a3547"/><text x="382" y="96">regex</text>
+            <rect x="428" y="78" width="80" height="28" rx="8" fill="#141C27" stroke="#2a3547"/><text x="468" y="96">outcome-tag</text>
+            <rect x="516" y="78" width="64" height="28" rx="8" fill="#141C27" stroke="#FF7AA2"/><text x="548" y="96" fill="#FF7AA2">judge</text>
+          </g>
+          <text x="420" y="120" fill="#5A6675" font-size="10.5">the judge&#8217;s calls are priced too</text>
+
+          <rect x="260" y="134" width="320" height="42" rx="10" fill="#141C27" stroke="#2a3547"/>
+          <text x="420" y="152" fill="#E9EFF6" font-size="10.5" font-weight="700">cost model</text>
+          <text x="420" y="168" fill="#8A97A6" font-size="10">the evaluated model&#8217;s completion is priced too</text>
+
+          <rect x="260" y="188" width="320" height="42" rx="10" fill="#141C27" stroke="#2a3547"/>
+          <text x="420" y="206" fill="#E9EFF6" font-size="10.5" font-weight="700">multi-tag runs</text>
+          <text x="420" y="222" fill="#8A97A6" font-size="10.5">reduce to last outcome in step order</text>
+
+          <text x="420" y="256" fill="#5A6675" font-size="10.5">every case resolves to a Score in [0.0, 1.0]</text>
+
+          <rect x="742" y="20" width="200" height="110" rx="14" fill="#10161F" stroke="#2a3547"/>
+          <text x="842" y="46" fill="#E9EFF6" font-size="12.5" font-weight="700">reports</text>
+          <text x="842" y="66" fill="#8A97A6" font-size="10.5">CostPerOutcomeReport</text>
+          <text x="842" y="82" fill="#8A97A6" font-size="10.5">DriftReport + baseline</text>
+          <text x="842" y="102" fill="#5A6675" font-size="10.5">Welch&#8217;s-t &#183; bootstrap CI</text>
+
+          <rect x="742" y="140" width="200" height="54" rx="14" fill="#10161F" stroke="#2a3547"/>
+          <text x="842" y="163" fill="#E9EFF6" font-size="12.5" font-weight="700">store</text>
+          <text x="842" y="181" fill="#8A97A6" font-size="10.5">SQLite &#183; verdryx.db</text>
+
+          <rect x="742" y="204" width="200" height="86" rx="14" fill="#10161F" stroke="#2a3547"/>
+          <text x="842" y="230" fill="#E9EFF6" font-size="12.5" font-weight="700">event bus + traces</text>
+          <text x="842" y="249" fill="#8A97A6" font-size="10.5">agent-events &#183; verdryx</text>
+          <text x="842" y="267" fill="#22D3EE" font-size="10">OTLP &#8594; VERDRYX_OTLP_ENDPOINT</text>
+        </g>
+        <g stroke="#5A6675" stroke-width="1.5" class="flow">
+          <line x1="184" y1="63" x2="232" y2="90" marker-end="url(#a2)"/>
+          <line x1="184" y1="121" x2="232" y2="155" marker-end="url(#a2)"/>
+          <line x1="184" y1="179" x2="232" y2="210" marker-end="url(#a2)"/>
+          <line x1="600" y1="80" x2="734" y2="70" marker-end="url(#a2)"/>
+          <line x1="600" y1="160" x2="734" y2="167" marker-end="url(#a2)"/>
+          <line x1="600" y1="220" x2="734" y2="247" marker-end="url(#a2)"/>
+        </g>
+      
+  <g fill="none">
+  <line x1="184" y1="63" x2="232" y2="90" pathLength="100" stroke="#FF7AA2" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="7 100" stroke-dashoffset="7"><animate attributeName="stroke-dashoffset" from="7" to="-100" dur="2.4s" begin="-0.00s" repeatCount="indefinite"/></line>
+  <line x1="184" y1="121" x2="232" y2="155" pathLength="100" stroke="#FF7AA2" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="7 100" stroke-dashoffset="7"><animate attributeName="stroke-dashoffset" from="7" to="-100" dur="2.4s" begin="-0.37s" repeatCount="indefinite"/></line>
+  <line x1="184" y1="179" x2="232" y2="210" pathLength="100" stroke="#FF7AA2" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="7 100" stroke-dashoffset="7"><animate attributeName="stroke-dashoffset" from="7" to="-100" dur="2.4s" begin="-0.74s" repeatCount="indefinite"/></line>
+  <line x1="600" y1="80" x2="734" y2="70" pathLength="100" stroke="#FF7AA2" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="7 100" stroke-dashoffset="7"><animate attributeName="stroke-dashoffset" from="7" to="-100" dur="2.4s" begin="-1.11s" repeatCount="indefinite"/></line>
+  <line x1="600" y1="160" x2="734" y2="167" pathLength="100" stroke="#FF7AA2" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="7 100" stroke-dashoffset="7"><animate attributeName="stroke-dashoffset" from="7" to="-100" dur="2.4s" begin="-1.48s" repeatCount="indefinite"/></line>
+  <line x1="600" y1="220" x2="734" y2="247" pathLength="100" stroke="#FF7AA2" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="7 100" stroke-dashoffset="7"><animate attributeName="stroke-dashoffset" from="7" to="-100" dur="2.4s" begin="-1.85s" repeatCount="indefinite"/></line>
+  </g>
+</svg>
