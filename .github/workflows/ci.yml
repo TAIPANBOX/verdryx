@@ -51,3 +51,5 @@ jobs:
         run: ./scripts/optional-imports.sh
       - name: no priced grader runs by default
         run: ./scripts/no-paid-by-default.sh
+      - name: exactly one runtime dependency
+        run: ./scripts/one-runtime-dependency.sh

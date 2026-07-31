@@ -46,6 +46,7 @@ ruff format --check .
 pytest
 ./scripts/optional-imports.sh
 ./scripts/no-paid-by-default.sh
+./scripts/one-runtime-dependency.sh
 ```
 
 Note `ruff format --check`, not `ruff format`. CI checks formatting rather than
@@ -64,7 +65,7 @@ an absent invariant.
    reading Parquet traces, plus the `dev` group. Installing verdryx must not
    drag an LLM SDK or Arrow onto a machine that only needs the deterministic
    graders. Adding a runtime dependency is a decision for the user, not a
-   convenience. *(not enforced)*
+   convenience. *(gate: `scripts/one-runtime-dependency.sh`)*
 2. **An optional dependency is imported lazily, inside the function that needs
    it, wrapped in `try/except ImportError` that re-raises with a pip-install
    hint.** Never at module top level. A top-level import turns an optional
