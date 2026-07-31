@@ -45,6 +45,7 @@ ruff check .
 ruff format --check .
 pytest
 ./scripts/optional-imports.sh
+./scripts/no-paid-by-default.sh
 ```
 
 Note `ruff format --check`, not `ruff format`. CI checks formatting rather than
@@ -82,22 +83,38 @@ an absent invariant.
 5. **A grader that costs money never runs by default.** The LLM judge is priced
    per call. Any code path that could reach a paid provider must be explicitly
    selected by the caller, and the default configuration must be the
-   deterministic graders. *(not enforced)*
+   deterministic graders. *(gate: `scripts/no-paid-by-default.sh`)*
 
 ## Decisions that have no gate yet
 
 This list is debt, and it is here to stay visible rather than to be tidy.
 
-**Held by this file alone: invariants 1, 3, 4 and 5.**
+**Held by this file alone: invariants 1, 3 and 4.**
 
 Invariant 1 is mechanically checkable and should become a script: assert that
 `[project].dependencies` in `pyproject.toml` contains exactly `rfc8785`. It is
 one line of parsing and it would catch the most likely regression, which is
 somebody moving an extra into the base list to make an import work.
 
-Invariant 5 is the highest-value untested property in this repo, because its
-failure mode is a bill rather than an exception. It deserves a test that
-constructs the default configuration and asserts no priced grader is selected.
+Invariant 5 is now `scripts/no-paid-by-default.sh`, and it checks all three of
+the ways that invariant currently holds, because losing any one is enough:
+
+1. `verdryx eval --model` is `required=True` with no default, so no invocation
+   picks a model for you and none spends without being told to.
+2. `build_graders()` with no `judge_adapter` registers no `LLM_JUDGE` grader,
+   so the priced grader cannot appear because a caller forgot to opt out.
+3. `AnthropicAdapter` has exactly one construction site, behind the explicit
+   `model != "stub"` branch, so the priced path stays easy to find.
+
+Points 1 and 3 are read from the AST; point 2 is checked by importing the
+package and calling it, because a behavioural claim deserves to be run rather
+than read. The script builds a throwaway venv for that import instead of
+assuming a prepared machine, since a gate that only runs on one machine is a
+gate that does not run.
+
+Verified by breaking three ways: a paid default on `--model`, a second
+`AnthropicAdapter` construction site, and `build_graders()` registering the
+judge unconditionally.
 
 Invariants 3 and 4 are judgement and probably stay judgement.
 
