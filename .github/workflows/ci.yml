@@ -47,3 +47,7 @@ jobs:
 
       - name: Run Pytest
         run: pytest
+      - name: no optional dependency at module level
+        run: ./scripts/optional-imports.sh
+      - name: no priced grader runs by default
+        run: ./scripts/no-paid-by-default.sh
