@@ -64,6 +64,7 @@ flowchart TB
   ASG -.->|imported by| MX
   ASG -.->|imported by| TFP
   ASG -.->|imported by| HX
+  ASG -.->|imported by| QX
   SPEC[["agent-passport: the spec"]] -.->|governs| BUS
 ```
 
