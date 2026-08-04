@@ -90,12 +90,22 @@ an absent invariant.
 
 This list is debt, and it is here to stay visible rather than to be tidy.
 
-**Held by this file alone: invariants 1, 3 and 4.**
+**Held by this file alone: invariants 3 and 4.**
 
-Invariant 1 is mechanically checkable and should become a script: assert that
-`[project].dependencies` in `pyproject.toml` contains exactly `rfc8785`. It is
-one line of parsing and it would catch the most likely regression, which is
-somebody moving an extra into the base list to make an import work.
+Invariant 1 used to be in that list, and this section asked for a script
+asserting that `[project].dependencies` contains exactly `rfc8785`. That script
+was already written. `scripts/one-runtime-dependency.sh` is in the gate list
+above, it parses `pyproject.toml` with `tomllib`, it fails in both directions
+(an added runtime dependency and a disappeared one), and it refuses to pass
+when the key is absent entirely rather than measuring nothing. Invariant 1's own
+marker said `(gate: ...)` the whole time; this paragraph disagreed with it four
+sections later.
+
+Both directions of a wrong marker cost something, and this is the quieter one:
+"held by prose alone" on something that has a gate sends the next session to
+write a check that exists, and it understates what this repository already
+refuses to let you do. Set a marker from evidence, both ways. Before writing
+that an invariant has no gate, look in `scripts/`.
 
 Invariant 5 is now `scripts/no-paid-by-default.sh`, and it checks all three of
 the ways that invariant currently holds, because losing any one is enough:
