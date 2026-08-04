@@ -379,9 +379,12 @@ A JSON file with an `id` and a list of `cases`:
 `id` must be stable across runs of the same eval set (it is not
 auto-generated): Scores are compared case-by-case over time, so a case's id
 needs to mean the same thing on every run. `grader` is one of `exact`
-(default), `regex`, `outcome_tag`, or `llm_judge`. For `outcome_tag` cases,
-`prompt` holds the outcome tag itself, since there is nothing to send a
-model when grading an already-recorded production outcome.
+(default), `regex`, `outcome_tag`, `llm_judge`, or `tool_trace`. For
+`outcome_tag` cases, `prompt` holds the outcome tag itself, since there is
+nothing to send a model when grading an already-recorded production outcome.
+A `tool_trace` case additionally requires `tools` and `expected_tools`, and
+those two fields are rejected on any other grader (see
+[Tool-call accuracy](#tool-call-accuracy-tool_trace)).
 
 ---
 
@@ -525,9 +528,10 @@ verdryx cost-per-correct --traces $TOKENFUSE_DATA_DIR
 `--model stub` selects a deterministic, network-free adapter, useful for
 validating an eval set's structure, and it's exactly what Verdryx's own test
 suite uses so CI never makes a real API call. Any other `--model` value is
-treated as a real Anthropic model id (requires the `anthropic` extra and
-`ANTHROPIC_API_KEY`, or `--events`/`ANTHROPIC_BASE_URL` to route through a
-proxy such as TokenFuse).
+treated as a real Anthropic model id, which requires the `anthropic` extra
+and `ANTHROPIC_API_KEY`. Set `ANTHROPIC_BASE_URL` to route those calls
+through a proxy such as TokenFuse instead of reaching Anthropic directly;
+that one is environment-only, there is no flag for it.
 
 The same operations are available as a plain Python API:
 

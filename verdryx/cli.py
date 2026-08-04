@@ -60,8 +60,10 @@ def _die(msg: str) -> NoReturn:
 def _build_adapter(model: str, config: Config) -> LLMAdapter:
     """`stub` is a recognized model name: a deterministic, network-free
     adapter for dry runs and tests. Anything else is a real Anthropic model
-    id, routed through TokenFuse if ANTHROPIC_BASE_URL / --base-url-style
-    config is set."""
+    id, routed through TokenFuse when ANTHROPIC_BASE_URL is set. That is the
+    only way to redirect it: there is deliberately no --base-url flag, so a
+    proxy is a property of the environment a run happens in rather than
+    something a single invocation can quietly change."""
     if model == "stub":
         return StubLLMAdapter()
     return AnthropicAdapter(
