@@ -86,6 +86,21 @@ an absent invariant.
    selected by the caller, and the default configuration must be the
    deterministic graders. *(gate: `scripts/no-paid-by-default.sh`)*
 
+6. **A number this README states about the repository is checked against the
+   repository.** A figure on a page has no owner and no clock: it is right the
+   day it is written, and the suite grows in commits that never open the README.
+   This repository was one of four caught by that on 2026-08-05, when the seven
+   figures on it-rat.com were audited against the code they describe: the page
+   said **217 tests where pytest collects 292**. It was not wrong when written.
+   The badge counts collected ITEMS, so a parametrised function counts once per
+   case, because that is what a contributor sees when the suite runs and it is
+   deliberately not the count of `def test_` lines, which is smaller and which
+   nobody arrives at by running anything.
+   *(gate: `scripts/readme-numbers.sh`; verified by moving the badge one test,
+   which fails it and names both figures. It collects rather than executes, so a
+   green badge cannot mean a red suite; `pytest` above it in CI is what says
+   they pass.)*
+
 ## Decisions that have no gate yet
 
 This list is debt, and it is here to stay visible rather than to be tidy.
