@@ -25,7 +25,7 @@ run_id-bearing trace:
   tagged calls: an untagged intermediate call's cost is not dropped, and a
   run that never gets tagged at all still produces a record, under the
   `UNTAGGED` ("(untagged)") label, instead of vanishing from the report.
-- A Breaker-blocked call (`decision` one of tokenfuse's seven block
+- A Breaker-blocked call (`decision` one of tokenfuse's nine block
   reasons) is still counted, but excluded from cost -- its `cost_microusd`
   is an avoided estimate, never a real settled charge.
 
@@ -68,12 +68,15 @@ _PARQUET_RUN_ID_COLUMN = "run_id"
 _PARQUET_STEP_COLUMN = "step"
 _PARQUET_DECISION_COLUMN = "decision"
 
-#: The seven Breaker block-decision wire strings (tokenfuse's
+#: The nine Breaker block-decision wire strings (tokenfuse's
 #: crates/core/src/outcomes.rs BLOCKED_DECISIONS, read off
-#: BreakerReason::as_wire_str()). A blocked call's cost_microusd holds an
-#: avoided estimate, never a real settled charge, so `_reduce_call_rows`
-#: excludes these rows from cost the same way tokenfuse-core's
-#: `compute_outcomes` does, while still counting them as calls.
+#: BreakerReason::as_wire_str() in crates/core/src/breaker.rs: the original
+#: seven plus the identity-map pair, unit_budget_exceeded and
+#: identity_mismatch, added in tokenfuse commit 833d6aa on 2026-07-23). A
+#: blocked call's cost_microusd holds an avoided estimate, never a real
+#: settled charge, so `_reduce_call_rows` excludes these rows from cost the
+#: same way tokenfuse-core's `compute_outcomes` does, while still counting
+#: them as calls.
 _BLOCKED_DECISIONS = frozenset(
     {
         "budget_exceeded",
@@ -83,12 +86,14 @@ _BLOCKED_DECISIONS = frozenset(
         "wasm_policy",
         "taint_blocked",
         "dlp_blocked",
+        "unit_budget_exceeded",
+        "identity_mismatch",
     }
 )
 
 
 def _is_blocked_decision(decision: str) -> bool:
-    """Whether `decision` is one of the seven Breaker block reasons."""
+    """Whether `decision` is one of the nine Breaker block reasons."""
     return decision in _BLOCKED_DECISIONS
 
 
@@ -242,7 +247,7 @@ def _reduce_call_rows(
     non-empty tag win (a run with no non-empty tag at all resolves to
     `UNTAGGED`, not dropped), then sum cost_usd across every one of that
     run's calls -- not only the tagged ones -- excluding any call whose
-    `decision` is one of the seven Breaker block reasons.
+    `decision` is one of the nine Breaker block reasons.
 
     A row whose run_id is None (the `run_id` column was missing from its
     file entirely, or this particular cell was null) cannot be correlated
