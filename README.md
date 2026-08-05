@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB.svg)
-![tests](https://img.shields.io/badge/tests-292-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-294-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/phase-1%20(mvp)-success.svg)
 
@@ -344,7 +344,7 @@ the same way tokenfuse-core does it
   tagged calls -- an untagged intermediate call's cost is not dropped, and
   a run that is never tagged at all still produces a record, under the
   `UNTAGGED` (`"(untagged)"`) label, rather than vanishing from the report.
-- A Breaker-blocked call (`decision` one of tokenfuse's seven block
+- A Breaker-blocked call (`decision` one of tokenfuse's nine block
   reasons, mirroring `is_blocked_decision()`) is still counted, but
   excluded from cost -- its `cost_microusd` is an avoided estimate, never a
   real settled charge.

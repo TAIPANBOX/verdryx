@@ -481,6 +481,73 @@ def test_read_parquet_blocked_call_on_an_otherwise_untagged_run(
     assert read_parquet(path) == [{"outcome": UNTAGGED, "cost_usd": 0.0}]
 
 
+def test_read_parquet_excludes_unit_budget_exceeded_call_cost_but_counts_the_call(
+    tmp_path, pyarrow_and_parquet
+) -> None:
+    """unit_budget_exceeded is one of tokenfuse's nine Breaker block reasons
+    (tokenfuse's crates/core/src/breaker.rs BreakerReason::UnitBudgetExceeded,
+    the budget-family sibling of budget_exceeded, added alongside
+    identity_mismatch in tokenfuse commit 833d6aa) -- its cost_microusd is an
+    avoided estimate, not a real charge, exactly like the other eight."""
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": ["r1", "r1"],
+            "step": [0, 1],
+            "outcome": ["", "case_resolved"],
+            "cost_microusd": [100_000, 9_000_000],
+            "decision": ["unit_budget_exceeded", "allow"],
+        }
+    )
+    path = tmp_path / "calls-00000000.parquet"
+    pq.write_table(table, path)
+
+    # The blocked row's 100_000 (avoided estimate) must not count; only the
+    # real, allowed 9_000_000 call contributes.
+    records = read_parquet(path)
+    assert records == [{"outcome": "case_resolved", "cost_usd": 9.0}]
+
+    # The run is still counted as a call, not dropped -- just not billed for
+    # the blocked call's avoided estimate.
+    report = cost_per_outcome(records)
+    assert report.resolved is not None
+    assert report.resolved.count == 1
+    assert report.resolved.total_cost_usd == pytest.approx(9.0)
+
+
+def test_read_parquet_excludes_identity_mismatch_call_cost_but_counts_the_call(
+    tmp_path, pyarrow_and_parquet
+) -> None:
+    """identity_mismatch is one of tokenfuse's nine Breaker block reasons
+    (tokenfuse's crates/core/src/breaker.rs BreakerReason::IdentityMismatch,
+    the auth-family sibling of dlp_blocked/taint_blocked, added alongside
+    unit_budget_exceeded in tokenfuse commit 833d6aa) -- blocked-cost
+    exclusion and the UNTAGGED bucket compose here the same way they do for
+    dlp_blocked: a run with only a blocked call and no tag lands in
+    UNTAGGED, counted, with zero cost, not the avoided estimate."""
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": ["r1"],
+            "step": [0],
+            "outcome": [""],
+            "cost_microusd": [5_000_000],
+            "decision": ["identity_mismatch"],
+        }
+    )
+    path = tmp_path / "calls-00000000.parquet"
+    pq.write_table(table, path)
+
+    records = read_parquet(path)
+    assert records == [{"outcome": UNTAGGED, "cost_usd": 0.0}]
+
+    report = cost_per_outcome(records)
+    untagged = report.get(UNTAGGED)
+    assert untagged is not None
+    assert untagged.count == 1
+    assert untagged.total_cost_usd == pytest.approx(0.0)
+
+
 def test_read_parquet_blocked_decision_missing_column_defaults_to_not_blocked(
     tmp_path, pyarrow_and_parquet
 ) -> None:
