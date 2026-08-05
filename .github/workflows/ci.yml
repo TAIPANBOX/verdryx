@@ -47,6 +47,14 @@ jobs:
 
       - name: Run Pytest
         run: pytest
+
+      # A number in a README is a claim with no owner: right the day it is
+      # written, and the suite grows in commits that never open the file. On
+      # 2026-08-05 four of seven such figures on it-rat.com were found stale
+      # against these repositories, and this one was among them: the page said
+      # 217 tests where pytest collects 292.
+      - name: the README's numbers are true
+        run: ./scripts/readme-numbers.sh
       - name: no optional dependency at module level
         run: ./scripts/optional-imports.sh
       - name: no priced grader runs by default
