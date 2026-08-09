@@ -13,7 +13,7 @@
     "agent_id": { "type": "string", "pattern": "^agent://[a-z0-9.-]+/[a-z0-9._/-]+$", "maxLength": 255 },
     "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
     "run_id": { "type": "string" },
-    "on_behalf_of": { "type": "array", "items": { "type": "string", "pattern": "^(agent|user)://" } },
+    "on_behalf_of": { "type": "array", "items": { "type": "string", "pattern": "^(agent|user)://" }, "maxItems": 32 },
     "data": { "type": "object", "additionalProperties": true },
     "prev_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
   }
