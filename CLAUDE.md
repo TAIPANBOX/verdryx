@@ -47,7 +47,15 @@ pytest
 ./scripts/optional-imports.sh
 ./scripts/no-paid-by-default.sh
 ./scripts/one-runtime-dependency.sh
+./scripts/readme-numbers.sh
+./scripts/gates-have-teeth.sh   # invariant 7; needs a clean tree and the package installed
 ```
+
+`readme-numbers.sh` was missing from this list until 2026-08-09 while CI ran
+it, so this instruction was strictly smaller than CI's. It also called `python`
+rather than `python3`, which every other script here gets right, so on macOS it
+could not run at all: it failed with `command not found` before reaching a
+single comparison. Both fixed in the same change.
 
 Note `ruff format --check`, not `ruff format`. CI checks formatting rather than
 applying it, so a local run that reformats files and then passes is not the
@@ -100,6 +108,27 @@ an absent invariant.
    which fails it and names both figures. It collects rather than executes, so a
    green badge cannot mean a red suite; `pytest` above it in CI is what says
    they pass.)*
+
+7. **A check must be able to tell "did not fail" from "did not run", and every
+   gate here has been made to fail on purpose to prove it can.** Three of the
+   four gates above already refuse when their subject is absent: no declared
+   dependencies at all, pytest reporting no collected count, an environment
+   that could not be built. Every one of those sentences was true, was
+   established by hand once in the session that wrote the script, and nothing
+   re-ran them.
+
+   A text parser does not break loudly: it stops matching and reports success.
+   The mutants that proved these gates lived in commit messages and in the
+   `*(gate: ...)*` markers above, which is a record of what was true once.
+   *(gate: `scripts/gates-have-teeth.sh`, 10 cases: six real faults each gate
+   must catch, two non-faults they must not, and two subjects taken away
+   entirely. The non-fault cases are the ones worth keeping: an optional
+   dependency imported INSIDE a function is exactly what invariant 2 allows,
+   and a gate that fired on it would be deleted by whoever is unblocking CI.)*
+
+   **What it does not cover.** It cannot test itself. It proves each gate
+   catches the faults named in it, not every fault of that kind. It found no
+   hole in any of the four.
 
 ## Decisions that have no gate yet
 

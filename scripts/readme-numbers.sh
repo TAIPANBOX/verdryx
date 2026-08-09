@@ -47,7 +47,7 @@ note() {
 	problems=$((problems + 1))
 }
 
-out=$(python -m pytest --collect-only -q 2>&1)
+out=$(python3 -m pytest --collect-only -q 2>&1)
 actual=$(printf '%s\n' "$out" | grep -oE '^[0-9]+ tests? collected' | grep -oE '^[0-9]+')
 
 if [ -z "${actual:-}" ]; then
