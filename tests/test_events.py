@@ -179,6 +179,32 @@ def test_bad_agent_id_pattern_is_rejected_by_schema(tmp_path, event_schema) -> N
         jsonschema.validate(instance=event, schema=event_schema)
 
 
+def test_delegation_chain_past_the_spec_depth_is_rejected(agent_id, event_schema) -> None:
+    """SPEC Sec 5.1 caps the delegation chain at 32 entries and the canonical
+    schema carries that as maxItems. The vendored copy had lost it, so this
+    suite validated a chain of any depth while reporting that it had checked
+    one against the wire contract.
+
+    Both directions are asserted deliberately. A bound that refuses 33 and
+    also refuses 32 is a different defect behind the same green tick.
+    """
+
+    def event(depth: int) -> dict[str, Any]:
+        return {
+            "schema": "taipanbox.dev/agent-event/v0.2",
+            "ts": "2026-07-09T03:12:44.100Z",
+            "source": "verdryx",
+            "type": "eval_run",
+            "agent_id": agent_id,
+            "on_behalf_of": [f"agent://acme.example/a/{i}" for i in range(depth)],
+        }
+
+    jsonschema.validate(instance=event(32), schema=event_schema)
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=event(33), schema=event_schema)
+
+
 # ------------------------------------------------------------------
 # prev_hash chain (SPEC.md Sec 6.5)
 # ------------------------------------------------------------------
