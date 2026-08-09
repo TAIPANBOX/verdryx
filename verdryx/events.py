@@ -80,6 +80,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -97,6 +98,29 @@ SCHEMA = "taipanbox.dev/agent-event/v0.2"
 
 #: This module's fixed ``source`` value in the shared envelope.
 SOURCE = "verdryx"
+
+#: SPEC.md Sec 3.1's ``agent://<trust-domain>/<name>`` grammar, and the cap the
+#: envelope puts on it. A local copy of two values agent-passport owns, which is
+#: the shape this estate keeps being bitten by, so it is a CHECKED copy:
+#: ``test_the_agent_id_rule_matches_the_vendored_schema`` reads both out of
+#: ``tests/fixtures/agent-event.v0.2.schema.json`` and fails when either moves.
+#: The fixture is byte-identical to the canonical one, held by estate-gates C2.
+#:
+#: Importing the pattern from the schema at runtime was the alternative and is
+#: worse: it would make every emit depend on reading a JSON file that exists for
+#: the tests, and invariant 1 keeps this package to one runtime dependency.
+AGENT_ID_PATTERN = re.compile(r"^agent://[a-z0-9.-]+/[a-z0-9._/-]+$")
+AGENT_ID_MAX_LENGTH = 255
+
+
+def is_canonical_agent_id(agent_id: str) -> bool:
+    """Whether ``agent_id`` is one a consumer validating the envelope accepts.
+
+    The same question the shared schema asks, in the same two parts: the
+    grammar and the length cap.
+    """
+    return len(agent_id) <= AGENT_ID_MAX_LENGTH and AGENT_ID_PATTERN.match(agent_id) is not None
+
 
 Severity = Literal["info", "low", "medium", "high", "critical"]
 
@@ -247,6 +271,8 @@ class EventLog:
     path: Path
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     skipped_empty_agent_id: int = field(default=0, init=False)
+    nonconforming_agent_id: int = field(default=0, init=False)
+    _warned_agent_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _next_hash: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -288,6 +314,7 @@ class EventLog:
         if not agent_id:
             self.skipped_empty_agent_id += 1
             return
+        self._note_agent_id_shape(agent_id)
 
         try:
             envelope: dict[str, Any] = {
@@ -316,3 +343,38 @@ class EventLog:
                 self.path,
                 exc_info=True,
             )
+
+    def _note_agent_id_shape(self, agent_id: str) -> None:
+        """Warn once per non-conforming id, count every event, write anyway.
+
+        The envelope requires SPEC.md Sec 3.1's grammar and a consumer
+        validating it rejects a line that misses it. Verdryx's own ``agent_id``
+        is whatever the caller evaluated under, so an id like ``"planner"``
+        produces a run that works and events a strict consumer throws away.
+
+        **Warned, never refused**, which is engram's decision for the same
+        problem and is right for the same reason: refusing to emit would empty
+        the event log for exactly the caller who needs to see the fault, and
+        losing fidelity in a log a consumer rejects is recoverable where losing
+        the eval that produced it is not. It also keeps ``emit``'s promise that
+        the surrounding operation always completes.
+
+        The warning is once per distinct id and the set is capped, because
+        ``emit`` takes the id per call: one misconfigured caller must not turn a
+        log file into a flood. Past the cap the count stays true and only the
+        repetition stops, which is what the cap is for.
+        """
+        if is_canonical_agent_id(agent_id):
+            return
+        self.nonconforming_agent_id += 1
+        if agent_id in self._warned_agent_ids:
+            return
+        if len(self._warned_agent_ids) < 64:
+            self._warned_agent_ids.add(agent_id)
+        logger.warning(
+            "verdryx.events: agent_id %r does not match the Agent Passport grammar "
+            "(agent://<trust-domain>/<name>, at most %d chars); the event is written "
+            "anyway and a consumer validating the envelope will reject it",
+            agent_id,
+            AGENT_ID_MAX_LENGTH,
+        )

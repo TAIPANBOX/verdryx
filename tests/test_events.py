@@ -18,7 +18,15 @@ from typing import Any
 import jsonschema
 import pytest
 
-from verdryx.events import EventLog, canonicalize, chain_hash, resolve_events_path
+from verdryx.events import (
+    AGENT_ID_MAX_LENGTH,
+    AGENT_ID_PATTERN,
+    EventLog,
+    canonicalize,
+    chain_hash,
+    is_canonical_agent_id,
+    resolve_events_path,
+)
 
 
 def _read_ndjson(path: Path) -> list[dict[str, Any]]:
@@ -330,3 +338,86 @@ def test_malformed_tail_starts_a_fresh_chain(tmp_path, agent_id) -> None:
     assert len(lines) == 2
     new_event = json.loads(lines[1])
     assert "prev_hash" not in new_event
+
+
+# ------------------------------------------------------------------
+# agent_id shape (SPEC.md Sec 3.1)
+# ------------------------------------------------------------------
+
+
+def test_the_agent_id_rule_matches_the_vendored_schema(event_schema) -> None:
+    """The two constants are a local copy of values agent-passport owns, so
+    they are read back out of the schema rather than trusted.
+
+    This is the check that makes the copy legitimate. Without it the module
+    would carry a fourth hand-maintained copy of a wire rule, which is the
+    shape this estate has been bitten by repeatedly.
+    """
+    declared = event_schema["properties"]["agent_id"]
+    assert AGENT_ID_PATTERN.pattern == declared["pattern"]
+    assert declared["maxLength"] == AGENT_ID_MAX_LENGTH
+
+
+def test_a_nonconforming_agent_id_is_warned_counted_and_still_written(
+    tmp_path, event_schema, caplog
+) -> None:
+    """An id the envelope rejects is reported, not swallowed and not refused.
+
+    The event is written on purpose: refusing would empty the log for exactly
+    the caller who needs to see the fault. So the line is there, a consumer
+    validating it rejects it, and the operator has been told why.
+    """
+    events_path = tmp_path / "events.ndjson"
+    log = EventLog(events_path)
+
+    with caplog.at_level(logging.WARNING, logger="verdryx.events"):
+        log.emit("eval_run", "planner", {"a": 1})
+
+    assert log.nonconforming_agent_id == 1
+    assert log.skipped_empty_agent_id == 0, "a malformed id is not an absent one"
+
+    written = _read_ndjson(events_path)
+    assert len(written) == 1, "the event is written anyway"
+    assert written[0]["agent_id"] == "planner", "and it is written unchanged, not repaired"
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=written[0], schema=event_schema)
+
+    assert any("does not match the Agent Passport grammar" in r.message for r in caplog.records)
+
+
+def test_a_nonconforming_agent_id_is_warned_once_and_counted_every_time(tmp_path, caplog) -> None:
+    """emit takes the id per call, so one misconfigured caller must not turn a
+    log file into a flood. The count stays true; only the repetition stops."""
+    log = EventLog(tmp_path / "events.ndjson")
+
+    with caplog.at_level(logging.WARNING, logger="verdryx.events"):
+        for _ in range(3):
+            log.emit("eval_run", "planner", {"a": 1})
+
+    assert log.nonconforming_agent_id == 3
+    warnings = [r for r in caplog.records if "does not match" in r.message]
+    assert len(warnings) == 1, f"warned {len(warnings)} times for one id"
+
+
+def test_a_canonical_agent_id_is_neither_warned_nor_counted(tmp_path, agent_id, caplog) -> None:
+    """The overeager case. A gate that fires on correct input gets deleted."""
+    log = EventLog(tmp_path / "events.ndjson")
+
+    with caplog.at_level(logging.WARNING, logger="verdryx.events"):
+        log.emit("eval_run", agent_id, {"a": 1})
+
+    assert log.nonconforming_agent_id == 0
+    assert not [r for r in caplog.records if "does not match" in r.message]
+
+
+def test_an_over_long_agent_id_is_nonconforming_even_though_it_matches(tmp_path) -> None:
+    """Both halves of the rule, not just the grammar: the cap is the half a
+    regex alone would miss."""
+    long_id = "agent://acme.example/" + ("a" * 300)
+    assert AGENT_ID_PATTERN.match(long_id) is not None, "the grammar accepts it"
+    assert not is_canonical_agent_id(long_id), "the cap does not"
+
+    log = EventLog(tmp_path / "events.ndjson")
+    log.emit("eval_run", long_id, {"a": 1})
+    assert log.nonconforming_agent_id == 1
