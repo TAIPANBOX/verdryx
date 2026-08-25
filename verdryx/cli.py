@@ -445,10 +445,21 @@ def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
     )
     if args.events or config.events_path:
         log = EventLog(resolve_events_path(args.events, config))
+        sent = 0
+        refused = 0
         for payload in payloads:
             subject = payload.pop("_subject")
+            if not slo.subject_is_emittable(subject):
+                refused += 1
+                continue
             log.emit("slo_burn", agent_id=subject, data=payload)
-        print(f"  emitted to {resolve_events_path(args.events, config)}")
+            sent += 1
+        print(f"  {sent} emitted to {resolve_events_path(args.events, config)}")
+        if refused:
+            print(
+                f"  {refused} not emitted: the subject is a {report.identity_field} "
+                f"and the envelope's only subject field is an agent id"
+            )
     print()
 
 

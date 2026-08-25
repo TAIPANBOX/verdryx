@@ -100,3 +100,11 @@ Feature: When is an agent reliable enough
     When quality is measured
     Then the report says it was not measured and why
     And the reason names where the scores would have to come from
+
+  # @test:test_a_key_keyed_subject_is_reported_and_never_emitted
+  Scenario: The identity that is safe to gate on is not one the bus can carry
+    Given the fleet is grouped by the credential rather than by the agent name
+    When an objective is breached
+    Then the report shows it against that credential
+    And no event is sent, because the envelope's only subject is an agent id
+    And nothing malformed is written in its place

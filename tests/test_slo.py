@@ -358,3 +358,23 @@ def test_slo_burn_is_registered_at_the_high_band():
 
 def _find(report, subject, sli):
     return next(m for m in report.subjects[subject] if m.sli == sli)
+
+
+def test_a_key_keyed_subject_is_reported_and_never_emitted():
+    """`key_id` is the sound key for anything enforced and is not an agent id.
+
+    The envelope has one subject field and SPEC 3.1 fixes its grammar, so a
+    measurement about a credential has nowhere to go on the bus. Reported,
+    not emitted, and not written malformed either.
+    """
+    assert slo.subject_is_emittable("agent://acme.example/support/bot")
+    assert not slo.subject_is_emittable("k-ops")
+    assert not slo.subject_is_emittable("")
+
+    runs = _runs(20, agent_id="", key_id="k-ops") + _runs(
+        20, prefix="bad", agent_id="", key_id="k-ops", outcome=OUTCOME_ESCALATED
+    )
+    report = slo.compute_slo(runs, identity_field=slo.IDENTITY_KEY_ID, min_events=10)
+    payloads = slo.burn_events(report)
+    assert payloads, "the breach is real and belongs in the report"
+    assert not [p for p in payloads if slo.subject_is_emittable(p["_subject"])]

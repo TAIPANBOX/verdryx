@@ -152,6 +152,12 @@ an absent invariant.
      fact from a fleet burning nothing, and the two are identical in the
      float. Same for an SLI below `min_events`: it reports `measured=False`
      with a reason naming where the missing input would have come from.
+   - **A subject the envelope cannot carry is reported and not emitted.**
+     Grouping on `key_id` is the sound choice for anything enforced and
+     produces credentials, not agents; the envelope's one subject field is an
+     `agent_id` with a fixed grammar. So a key-keyed breach appears in the
+     report and never on the bus, rather than being written malformed for a
+     consumer to reject.
    - **A run nobody can attribute is counted, never bucketed.** A fleet scores
      better the less of it is identified either way; only one of the two says
      so, and `SloReport.unattributed_runs` is printed beside the figures
@@ -165,8 +171,8 @@ an absent invariant.
    looks at the whole window and the rate at a recent slice of it
    (`BURN_WINDOW_FRACTION`), which is the SRE multi-window shape and, more to
    the point, is two questions instead of one asked twice.
-   *(test: the twelve scenarios in `features/agent-error-budget.feature`, each
-   bound to a named test by `scripts/features-are-bound.sh`; twenty-eight
+   *(test: the thirteen scenarios in `features/agent-error-budget.feature`,
+   each bound to a named test by `scripts/features-are-bound.sh`; twenty-nine
    tests in `tests/test_slo.py`, six of which were verified red against a
    planted defect: the evidence bar removed, unattributed runs bucketed, the
    cost reference taken per subject instead of over the fleet, containment

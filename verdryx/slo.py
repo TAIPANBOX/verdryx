@@ -79,6 +79,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from verdryx.costper import UNTAGGED
+from verdryx.events import is_canonical_agent_id
 from verdryx.models import OUTCOME_RESOLVED, SloMeasurement, SloReport
 
 #: The four indicators. Named here rather than inferred, because a consumer
@@ -578,6 +579,29 @@ def breach_is_established(m: SloMeasurement) -> bool:
     observation, act on the evidence) applied to a plane that only observes.
     """
     return m.measured and m.ci_high < m.target
+
+
+def subject_is_emittable(subject: str) -> bool:
+    """Whether this subject can be the `agent_id` of an envelope at all.
+
+    Grouping on `key_id` is the SOUND choice for anything enforced, and it
+    produces subjects like `k-ops`, which are credentials rather than agents.
+    The envelope has one subject field, it is `agent_id`, and SPEC 3.1 fixes
+    its grammar; there is nowhere in it to say "this measurement is about a
+    key". So a key-keyed measurement is reported and NOT emitted.
+
+    The alternative was to let `EventLog.emit` do what it does with any
+    non-conforming id: warn once and write it anyway. That is right for an
+    operator who mislabelled an agent, because the line is still about an
+    agent and a consumer can repair it. It is wrong here, because the line
+    would not be about an agent at all, and a consumer validating the envelope
+    would reject a subject this plane knew was malformed before it wrote it.
+
+    `@claude` 2026-08-26. The gap is real and is stated in the report rather
+    than papered over: the identity that is sound to gate on is not the
+    identity the bus can carry, which is the same seam invariant 9 records.
+    """
+    return is_canonical_agent_id(subject)
 
 
 def burn_events(report: SloReport) -> list[dict[str, Any]]:
