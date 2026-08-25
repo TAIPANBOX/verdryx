@@ -194,11 +194,6 @@ run_case "features-are-bound: a scenario with nothing behind it" fail \
 	"$(py 'edit("features/agent-error-budget.feature", "  # @test:test_the_error_budget_goes_negative_rather_than_clamping\n", "")')" \
 	"proves nothing"
 
-run_case "features-are-bound: the subject taken away entirely" fail \
-	'./scripts/features-are-bound.sh' \
-	"$(py 'import shutil; shutil.rmtree("features")')" \
-	"not a pass"
-
 run_case "features-are-bound: a scenario renamed is still bound" pass \
 	'./scripts/features-are-bound.sh' \
 	"$(py 'edit("features/agent-error-budget.feature", "Scenario: A ratio without its sample size is not evidence", "Scenario: a ratio needs its sample size")')"
@@ -270,6 +265,11 @@ m = re.search(r"badge/tests-\d+-", s)
 assert m, "no test badge in README.md"
 open("README.md","w").write(s.replace(m.group(0), "badge/nothing-", 1))')" \
 	"nothing to compare against"
+
+run_case "features-are-bound: the subject taken away entirely" fail \
+	'./scripts/features-are-bound.sh' \
+	"$(py 'import shutil; shutil.rmtree("features")')" \
+	"not a pass"
 
 echo
 if [ -n "$(git status --porcelain)" ]; then
