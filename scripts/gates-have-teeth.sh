@@ -191,17 +191,17 @@ run_case "features-are-bound: a binding names a test that is gone" fail \
 
 run_case "features-are-bound: a scenario with nothing behind it" fail \
 	'./scripts/features-are-bound.sh' \
-	"$(py 'edit(\'features/agent-error-budget.feature\', \'  # @test:test_the_error_budget_goes_negative_rather_than_clamping\\n\', \'\')')" \
+	"$(py 'edit("features/agent-error-budget.feature", "  # @test:test_the_error_budget_goes_negative_rather_than_clamping\n", "")')" \
 	"proves nothing"
 
 run_case "features-are-bound: the subject taken away entirely" fail \
 	'./scripts/features-are-bound.sh' \
-	"$(py 'import shutil; shutil.rmtree(\'features\')')" \
+	"$(py 'import shutil; shutil.rmtree("features")')" \
 	"not a pass"
 
 run_case "features-are-bound: a scenario renamed is still bound" pass \
 	'./scripts/features-are-bound.sh' \
-	"$(py 'edit(\'features/agent-error-budget.feature\', \'Scenario: A ratio without its sample size is not evidence\', \'Scenario: a ratio needs its sample size\')')"
+	"$(py 'edit("features/agent-error-budget.feature", "Scenario: A ratio without its sample size is not evidence", "Scenario: a ratio needs its sample size")')"
 
 run_case "one-runtime-dependency: a second runtime dependency" fail \
 	'./scripts/one-runtime-dependency.sh' \
