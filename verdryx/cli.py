@@ -31,8 +31,9 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, NoReturn
 
+from verdryx import slo
 from verdryx.config import Config
-from verdryx.costper import UNTAGGED, cost_per_outcome, load_records
+from verdryx.costper import UNTAGGED, cost_per_outcome, load_records, load_run_records
 from verdryx.drift import DEFAULT_CONFIDENCE, DEFAULT_THRESHOLD, compute_drift
 from verdryx.events import EventLog, resolve_events_path
 from verdryx.graders import (
@@ -375,6 +376,82 @@ def _cmd_cost_per_correct(args: argparse.Namespace, _config: Config) -> None:
     )
 
 
+def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
+    source = args.traces if args.traces else args.input
+    records = load_run_records(source)
+    targets = {}
+    for name in slo.SLI_NAMES:
+        value = getattr(args, f"target_{name}", None)
+        if value is not None:
+            targets[name] = value
+    report = slo.compute_slo(
+        records,
+        identity_field=args.identity_field,
+        window=args.window,
+        targets=targets or None,
+        confidence=args.confidence,
+        min_events=args.min_events,
+        good_outcomes=[o.strip() for o in args.good_outcomes.split(",") if o.strip()],
+        quality_floor=args.quality_floor,
+        cost_multiple=args.cost_multiple,
+    )
+
+    print(f"\nAgent error budget -- {source}")
+    print(
+        f"  window={report.window}  subjects={len(report.subjects)}  "
+        f"runs={report.total_runs}  identity={report.identity_field}"
+    )
+    print(f"  ({slo.IDENTITY_NOTES[report.identity_field]})")
+    if report.cost_reference_usd is not None:
+        print(f"  fleet median run cost: ${report.cost_reference_usd:.6f}")
+    if report.unattributed_runs:
+        # Printed whether or not anything else is wrong, and near the top. A
+        # fleet scores better the less of it is identified, so the coverage
+        # has to arrive beside the figure rather than under it.
+        share = report.unattributed_runs / report.total_runs if report.total_runs else 0.0
+        print(
+            f"  {report.unattributed_runs} run(s) ({share:.1%}) carry no "
+            f"{report.identity_field} and are in no subject's numbers"
+        )
+
+    for subject, measurements in report.subjects.items():
+        print(f"\n-- {subject}")
+        for m in measurements:
+            if not m.measured:
+                print(f"     {m.sli:<16} not measured: {m.unmeasured_reason}")
+                continue
+            flag = f"  [{m.trigger.upper()}]" if m.trigger else ""
+            if m.trigger in (slo.TRIGGER_EXHAUSTED, slo.TRIGGER_FAST_BURN) and not (
+                slo.breach_is_established(m)
+            ):
+                # Said out loud, because a trigger with no event beside it
+                # otherwise reads as a bug in the emitter.
+                flag += " (not on the bus: the interval still covers the target)"
+            print(
+                f"     {m.sli:<16} {m.observed:.4f} (target {m.target}, "
+                f"ci [{m.ci_low:.4f},{m.ci_high:.4f}], n={m.events})"
+            )
+            print(f"     {'':<16} budget {m.remaining:+.1%} left, burn {m.burn_rate:.2f}x{flag}")
+
+    if report.blind_spots:
+        print("\n  blind to:")
+        for line in report.blind_spots:
+            print(f"    {line}")
+
+    payloads = slo.burn_events(report)
+    print(
+        f"\n  {len(payloads)} slo_burn event(s) to emit "
+        f"(exhausted and fast burn only; a slow burn is reported, never alerted)"
+    )
+    if args.events or config.events_path:
+        log = EventLog(resolve_events_path(args.events, config))
+        for payload in payloads:
+            subject = payload.pop("_subject")
+            log.emit("slo_burn", agent_id=subject, data=payload)
+        print(f"  emitted to {resolve_events_path(args.events, config)}")
+    print()
+
+
 def _get_version() -> str:
     try:
         from verdryx import __version__
@@ -468,6 +545,85 @@ def _build_parser() -> argparse.ArgumentParser:
         help="directory of tokenfuse Parquet trace segments (TOKENFUSE_DATA_DIR)",
     )
 
+    p_slo = sub.add_parser(
+        "slo",
+        help="error budgets and burn rate over a tokenfuse trace (measurement only)",
+    )
+    p_slo_source = p_slo.add_mutually_exclusive_group(required=True)
+    p_slo_source.add_argument(
+        "--input", metavar="PATH", help="NDJSON, CSV or Parquet of per-run records"
+    )
+    p_slo_source.add_argument(
+        "--traces",
+        metavar="DIR",
+        help="directory of tokenfuse Parquet trace segments (TOKENFUSE_DATA_DIR)",
+    )
+    p_slo.add_argument(
+        "--identity-field",
+        choices=list(slo.IDENTITY_FIELDS),
+        default=slo.IDENTITY_AGENT_ID,
+        help=(
+            "which field groups a subject. agent_id is a client-supplied "
+            "header and sound only for attribution; key_id is resolved by the "
+            "gateway from the presented credential and is empty unless client "
+            "keys are configured (default: agent_id)"
+        ),
+    )
+    p_slo.add_argument("--window", default="28d", help="the window label to report (default: 28d)")
+    p_slo.add_argument(
+        "--confidence",
+        type=float,
+        default=slo.DEFAULT_CONFIDENCE,
+        help=f"confidence for the Wilson interval (default: {slo.DEFAULT_CONFIDENCE})",
+    )
+    p_slo.add_argument(
+        "--min-events",
+        type=int,
+        default=slo.DEFAULT_MIN_EVENTS,
+        help=(
+            "below this many eligible runs an indicator reports as not "
+            f"measured rather than as a ratio (default: {slo.DEFAULT_MIN_EVENTS})"
+        ),
+    )
+    p_slo.add_argument(
+        "--good-outcomes",
+        default=",".join(slo.DEFAULT_GOOD_OUTCOMES),
+        help=(
+            "comma-separated outcome tags that count as task success. "
+            "`escalated` is deliberately NOT among the defaults: the budget "
+            f"prices autonomy (default: {','.join(slo.DEFAULT_GOOD_OUTCOMES)})"
+        ),
+    )
+    p_slo.add_argument(
+        "--quality-floor",
+        type=float,
+        default=slo.DEFAULT_QUALITY_FLOOR,
+        help=f"a run scoring at or above this meets the floor (default: {slo.DEFAULT_QUALITY_FLOOR})",
+    )
+    p_slo.add_argument(
+        "--cost-multiple",
+        type=float,
+        default=slo.DEFAULT_COST_MULTIPLE,
+        help=(
+            "a run costing more than this multiple of the FLEET median fails "
+            f"cost discipline (default: {slo.DEFAULT_COST_MULTIPLE})"
+        ),
+    )
+    for name in slo.SLI_NAMES:
+        p_slo.add_argument(
+            f"--target-{name.replace('_', '-')}",
+            dest=f"target_{name}",
+            type=float,
+            default=None,
+            help=f"objective for {name} (default: {slo.DEFAULT_TARGET})",
+        )
+    p_slo.add_argument(
+        "--events",
+        metavar="PATH",
+        default=None,
+        help="append slo_burn events here (also VERDRYX_EVENTS_PATH)",
+    )
+
     sub.add_parser("version", help="print the verdryx version")
 
     return parser
@@ -482,6 +638,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace, Config], None]] = {
     "baseline": _cmd_baseline,
     "drift": _cmd_drift,
     "cost-per-correct": _cmd_cost_per_correct,
+    "slo": _cmd_slo,
     "version": _cmd_version,
 }
 

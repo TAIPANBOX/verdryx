@@ -384,3 +384,73 @@ class CostPerOutcomeReport:
     @property
     def abandoned(self) -> OutcomeCost | None:
         return self.by_outcome.get(OUTCOME_ABANDONED)
+
+
+@dataclass
+class SloMeasurement:
+    """One SLI measured over one subject in one window.
+
+    A ratio of good events over eligible events, never a mean of scores. The
+    distinction is the whole reason this type exists rather than reusing
+    `DriftReport`: a mean cannot be turned into a budget, and it hides the
+    distribution the budget is pricing. Two fleets with the same mean score,
+    one steady and one alternating between perfect and useless, have very
+    different reliability and identical means.
+
+    `remaining` is a FRACTION of the error budget and goes negative when the
+    budget is overspent. That is not a defect to clamp: minus one means the
+    subject has spent twice the failures the objective allows, and an operator
+    reading "0%" for both that and a budget exactly used up would be told two
+    very different situations look the same.
+
+    `ci_low`/`ci_high` are the Wilson interval, and they are here because the
+    ratio alone is not evidence. Three runs out of four is 0.75 and says
+    almost nothing; three hundred out of four hundred is the same ratio and
+    says a great deal. Anything acting on `observed` without reading `events`
+    is acting on noise.
+    """
+
+    sli: str
+    subject: str
+    observed: float
+    target: float
+    events: int
+    good: int
+    ci_low: float
+    ci_high: float
+    remaining: float
+    burn_rate: float
+    #: How many runs the burn RATE was computed over, which is a different and
+    #: much smaller number than `events`. Zero means the rate could not be
+    #: measured at all (no usable timestamp, or too few recent runs) and must
+    #: not be read as "burning at zero": the two look identical in the float
+    #: and are opposite facts.
+    burn_events_seen: int
+    trigger: str | None
+    measured: bool = True
+    unmeasured_reason: str = ""
+
+
+@dataclass
+class SloReport:
+    """Every SLI measured over every subject, plus what could not be measured.
+
+    `unattributed` is not a footnote. A run whose identity field is empty
+    cannot be grouped, so it appears in no subject's numbers, and a report
+    that quietly dropped those runs would show a fleet that looks better the
+    less of it is identified. The count is carried here so the figure a reader
+    acts on always arrives beside how much of the estate it covers.
+
+    `blind_spots` carries the windows that hold too few runs to fire at the
+    observed event rate. A burn-rate alert that can never trigger reports
+    exactly like one that has nothing to report, which is the failure this
+    estate names most often in its own tooling.
+    """
+
+    window: str
+    identity_field: str
+    subjects: dict[str, list[SloMeasurement]]
+    unattributed_runs: int
+    total_runs: int
+    blind_spots: list[str]
+    cost_reference_usd: float | None
