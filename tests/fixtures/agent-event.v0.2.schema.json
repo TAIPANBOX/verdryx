@@ -14,6 +14,18 @@
     "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
     "run_id": { "type": "string" },
     "on_behalf_of": { "type": "array", "items": { "type": "string", "pattern": "^(agent|user)://" }, "maxItems": 32 },
+    "delegation_proof": {
+      "type": "object",
+      "description": "SPEC 5.2. Records that the on_behalf_of chain was proved by an RFC 8693 token, without carrying the token: a delegation token is a live credential and an event stream is a replicated, hash-chained record. Absent means NOT proven, never proven elsewhere.",
+      "required": ["jti", "jkt", "iss", "exp"],
+      "additionalProperties": false,
+      "properties": {
+        "jti": {"type": "string", "minLength": 1, "description": "The token's id, so an auditor can find it in the issuer's own record."},
+        "jkt": {"type": "string", "minLength": 1, "description": "RFC 7638 thumbprint the token was bound to: who was holding it, which a chain of names cannot say."},
+        "iss": {"type": "string", "minLength": 1, "description": "The issuer, so the right keys and the right revocation list are consulted."},
+        "exp": {"type": "integer", "description": "When the proof stopped being one. SPEC 2 says the chain carries no freshness; this is the freshness, and it belongs to the proof."}
+      }
+    },
     "data": { "type": "object", "additionalProperties": true },
     "prev_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
   }
