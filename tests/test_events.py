@@ -356,6 +356,39 @@ _VEC_CANONICAL_3 = (
 )
 _VEC_HASH_3 = "sha256:998cbc146b07e115318ce378e0579fcd1927066ef4316900ec7d66ba157e7c4b"
 
+# Vector 4. `delegation_proof` (SPEC 5.2) is a top-level sibling of `data`, so
+# it is exactly the member a language's event STRUCT may have no field for.
+# Python is safe by construction here, because these functions take a dict and
+# a dict carries whatever the line carried, and this vector is what turns "safe
+# by construction" into "proved on every run". Go's event type was not: it
+# hashed a re-marshal of its own struct until 2026-08-26, the member vanished
+# before the digest, and an honestly chained stream was reported as tampered
+# with by our own conformance tool.
+_VEC_EVENT_4 = {
+    "schema": "taipanbox.dev/agent-event/v0.3",
+    "ts": "2026-08-26T12:00:03Z",
+    "source": "vouchryx",
+    "type": "delegation_issued",
+    "agent_id": "agent://acme.example/support/tier1-bot",
+    "severity": "info",
+    "run_id": "run-0001",
+    "delegation_proof": {
+        "jti": "tok-9f2c",
+        "jkt": "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs",
+        "iss": "https://idryx.acme.example",
+        "exp": 1786000000,
+    },
+    "data": {"scope": "read:tickets"},
+}
+_VEC_CANONICAL_4 = (
+    '{"agent_id":"agent://acme.example/support/tier1-bot","data":{"scope":"read:tickets"},'
+    '"delegation_proof":{"exp":1786000000,"iss":"https://idryx.acme.example",'
+    '"jkt":"NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs","jti":"tok-9f2c"},'
+    '"run_id":"run-0001","schema":"taipanbox.dev/agent-event/v0.3","severity":"info",'
+    '"source":"vouchryx","ts":"2026-08-26T12:00:03Z","type":"delegation_issued"}'
+)
+_VEC_HASH_4 = "sha256:97161b1b4dd0b64d683e27611279beb7024a91d0dba2fd736d10e96edabd7680"
+
 
 @pytest.mark.parametrize(
     "event,canonical,expected_hash",
@@ -363,6 +396,7 @@ _VEC_HASH_3 = "sha256:998cbc146b07e115318ce378e0579fcd1927066ef4316900ec7d66ba15
         (_VEC_EVENT_1, _VEC_CANONICAL_1, _VEC_HASH_1),
         (_VEC_EVENT_2, _VEC_CANONICAL_2, _VEC_HASH_2),
         (_VEC_EVENT_3, _VEC_CANONICAL_3, _VEC_HASH_3),
+        (_VEC_EVENT_4, _VEC_CANONICAL_4, _VEC_HASH_4),
     ],
 )
 def test_canonicalize_and_chain_hash_match_pinned_vectors(
