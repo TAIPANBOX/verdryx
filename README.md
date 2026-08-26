@@ -306,6 +306,32 @@ any other quality regression does: tool-selection drift detection for free.
 
 ---
 
+## Error budgets
+
+`verdryx slo` turns quality into an allowance an operator can be out of: four
+indicators, each a ratio of good runs over eligible runs, with the error
+budget left on each and the rate it is going.
+
+```sh
+verdryx slo --traces "$TOKENFUSE_DATA_DIR"
+```
+
+It measures. It does not enforce: no policy is written, no agent is demoted,
+and there is no autonomy tier in this stack to demote one into. The reasons
+that is the honest shape rather than an unfinished one are in invariant 9 of
+CLAUDE.md.
+
+Three things it will not do, each on purpose. It sends no event unless the
+confidence interval's upper bound sits below the objective, so a shortfall
+that could be a small sample is reported and not paged. It never alerts on a
+slow burn, because severity is fixed per event type and a budget that will be
+gone by Friday does not belong in the band for one already gone. And it prints
+what it could not measure beside what it could, so four calm indicators cannot
+quietly mean four unmeasured ones.
+
+The design, the arguments behind each default, and the bug we shipped for an
+afternoon are written up in [docs/agent-slos.md](docs/agent-slos.md).
+
 ## Cost per outcome
 
 <div align="center">
