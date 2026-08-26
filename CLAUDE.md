@@ -139,7 +139,11 @@ an absent invariant.
    every one of its outputs is a small float that looks equally authoritative
    whether it rests on four hundred runs or four.
 
-   Three shapes, each with its own way of lying quietly:
+   Six shapes, each with its own way of lying quietly. It said "three"
+   over four bullets when it was written and over six on 2026-08-26,
+   which is the same failure as invariant 6 in the file that records
+   invariant 6: a count in prose beside a list that grows. Counted by
+   reading the list.
 
    - **A ratio travels with its interval and its `n`.** Three of four runs is
      0.75 and says nothing; three hundred of four hundred is 0.75 and says a
@@ -161,7 +165,20 @@ an absent invariant.
    - **A run nobody can attribute is counted, never bucketed.** A fleet scores
      better the less of it is identified either way; only one of the two says
      so, and `SloReport.unattributed_runs` is printed beside the figures
-     rather than under them.
+     rather than under them. The same rule holds for the OTHER input:
+     `unattributed_scores` counts a score from a `verdryx eval` that was given
+     no `--agent-id`. Two counters and not one, because a fleet can be well
+     identified on the gateway and badly identified in its eval store.
+   - **A reason that has stopped being true is worse than none.**
+     `quality_floor` reported itself unmeasured because `eval_runs` carried no
+     subject, so a score could not be joined to a fleet at all. That column
+     exists since 2026-08-26 and the reason was rewritten in the same change,
+     because the old one sent a reader to close a gap already closed. When a
+     limitation is removed, its `UNMEASURED_REASONS` entry moves with it.
+   - **An absence is named as the absence it is.** "No run carried an outcome
+     tag" is the wrong diagnosis for a subject with no runs at all, which is
+     now reachable: an agent can be known to the report only from its eval
+     scores. Three absences, three sentences (`slo._unmeasured_reason`).
 
    **Found by its own test, and worth keeping written down.** The module first
    computed the error budget and the burn rate over the same runs, which makes
@@ -171,14 +188,15 @@ an absent invariant.
    looks at the whole window and the rate at a recent slice of it
    (`BURN_WINDOW_FRACTION`), which is the SRE multi-window shape and, more to
    the point, is two questions instead of one asked twice.
-   *(test: the thirteen scenarios in `features/agent-error-budget.feature`,
-   each bound to a named test by `scripts/features-are-bound.sh`; twenty-nine
+   *(test: the twenty scenarios in `features/agent-error-budget.feature`,
+   each bound to a named test by `scripts/features-are-bound.sh`; thirty-seven
    tests in `tests/test_slo.py`, six of which were verified red against a
    planted defect: the evidence bar removed, unattributed runs bucketed, the
    cost reference taken per subject instead of over the fleet, containment
    read off the nine Breaker reasons alone, the burn rate returned to one
-   window, and the budget clamped at zero. `gate: scripts/features-are-bound.sh`
-   holds the binding in both directions; nothing mechanical can hold whether a
+   window, and the budget clamped at zero. The eight added on 2026-08-26 for
+   the eval-store join were all red against the code before it.
+   `gate: scripts/features-are-bound.sh` holds the binding in both directions; nothing mechanical can hold whether a
    scenario's prose still describes its test, and that limit is in the
    script.)*
 

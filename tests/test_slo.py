@@ -193,12 +193,22 @@ def test_an_indicator_below_min_events_reports_as_unmeasured():
 
 
 def test_quality_floor_says_why_it_could_not_be_measured():
-    """The reason is structural and an operator needs to be sent to the right
-    place: scores live in an eval store with no agent_id column."""
+    """An operator needs to be sent to the right place, and the right place
+    changed on 2026-08-26.
+
+    The reason used to be structural: scores lived in an eval store whose
+    `eval_runs` table had no subject on it, so nothing could be joined to a
+    fleet at all. That is no longer true, and a reason that has stopped being
+    true is worse than none: it sends the reader to close a gap that is
+    already closed. It now names the two commands that carry a score from the
+    eval store to this report.
+    """
     report = slo.compute_slo(_runs(40))
     m = _find(report, "agent://acme.example/support/bot", slo.SLI_QUALITY_FLOOR)
     assert m.measured is False
-    assert "eval_runs table carries no agent_id" in m.unmeasured_reason
+    assert "--scores-db" in m.unmeasured_reason
+    assert "eval --agent-id" in m.unmeasured_reason
+    assert "carries no agent_id" not in m.unmeasured_reason
 
 
 def test_quality_floor_is_measured_when_scores_are_supplied():
@@ -378,3 +388,147 @@ def test_a_key_keyed_subject_is_reported_and_never_emitted():
     payloads = slo.burn_events(report)
     assert payloads, "the breach is real and belongs in the report"
     assert not [p for p in payloads if slo.subject_is_emittable(p["_subject"])]
+
+
+# ------------------------------------------- scores joined to a fleet subject
+
+
+def _score(subject="agent://acme.example/support/bot", value=1.0, **kw):
+    """One score record as `Store.score_records` produces it."""
+    base = {"agent_id": subject, "score": value}
+    base.update(kw)
+    return base
+
+
+def _scores(n, subject="agent://acme.example/support/bot", value=1.0, **kw):
+    return [_score(subject, value, **kw) for _ in range(n)]
+
+
+def test_quality_floor_computes_from_scores_supplied_beside_the_trace():
+    """The indicator the module shipped dark.
+
+    The trace carries no score and the eval store carries no tokenfuse run id,
+    so the join is on the SUBJECT and nowhere else. Half the scores under the
+    floor is a ratio of one half.
+    """
+    report = slo.compute_slo(
+        _runs(40),
+        scores=_scores(20, value=0.9) + _scores(20, value=0.1),
+        min_events=10,
+    )
+    m = _find(report, "agent://acme.example/support/bot", slo.SLI_QUALITY_FLOOR)
+    assert m.measured is True
+    assert m.events == 40
+    assert m.observed == pytest.approx(0.5)
+
+
+def test_a_score_with_no_subject_is_counted_and_never_bucketed():
+    """The rule `unattributed_runs` already holds, applied to the other input.
+
+    A fleet must not score better for being less identified, and it does
+    exactly that if an unattributed score is dropped OR if it is filed under a
+    placeholder subject.
+    """
+    report = slo.compute_slo(
+        _runs(40),
+        scores=_scores(20, value=1.0) + _scores(10, subject="", value=0.0),
+        min_events=10,
+    )
+    assert report.unattributed_scores == 10
+    assert report.total_scores == 30
+    assert "" not in report.subjects
+    m = _find(report, "agent://acme.example/support/bot", slo.SLI_QUALITY_FLOOR)
+    assert m.events == 20, "the ten with no subject are in nobody's denominator"
+    assert m.observed == pytest.approx(1.0)
+
+
+def test_a_subject_known_only_from_its_scores_still_appears():
+    """An agent evaluated offline whose gateway traffic is not tagged.
+
+    Dropping its scores would be a silent loss, and filing them under a trace
+    subject would be a fabrication. It gets its own row, with the three
+    trace-fed indicators reported as not computed.
+    """
+    report = slo.compute_slo(
+        _runs(40),
+        scores=_scores(20, subject="agent://acme.example/research/scout", value=1.0),
+        min_events=10,
+    )
+    assert "agent://acme.example/research/scout" in report.subjects
+    m = _find(report, "agent://acme.example/research/scout", slo.SLI_QUALITY_FLOOR)
+    assert m.measured is True
+    assert m.observed == pytest.approx(1.0)
+    task = _find(report, "agent://acme.example/research/scout", slo.SLI_TASK_SUCCESS)
+    assert task.measured is False
+    assert "no run" in task.unmeasured_reason
+
+
+def test_a_subject_with_no_runs_at_all_says_so_rather_than_naming_a_missing_tag():
+    """ "No run carried an outcome tag" is the wrong diagnosis when there were
+    no runs. It sends an operator to look at a header they never had a chance
+    to send."""
+    report = slo.compute_slo(
+        [],
+        scores=_scores(20, subject="agent://acme.example/research/scout"),
+        min_events=10,
+    )
+    task = _find(report, "agent://acme.example/research/scout", slo.SLI_TASK_SUCCESS)
+    assert task.measured is False
+    assert "no runs at all" in task.unmeasured_reason
+
+
+def test_a_score_on_the_trace_and_one_supplied_are_judged_together():
+    """A record carrying its own `score` column is a legitimate input and did
+    not stop being one. Both streams land in the same denominator."""
+    report = slo.compute_slo(
+        _runs(20, score=1.0),
+        scores=_scores(20, value=0.0),
+        min_events=10,
+    )
+    m = _find(report, "agent://acme.example/support/bot", slo.SLI_QUALITY_FLOOR)
+    assert m.events == 40
+    assert m.observed == pytest.approx(0.5)
+
+
+def test_scores_keyed_by_an_agent_cannot_be_attributed_to_a_credential():
+    """Grouping by `key_id` is the sound choice for anything enforced, and the
+    eval store has no credential on it. Every score is then unattributed, which
+    is the honest answer and is counted rather than quietly absent."""
+    report = slo.compute_slo(
+        _runs(40),
+        scores=_scores(20),
+        identity_field=slo.IDENTITY_KEY_ID,
+        min_events=10,
+    )
+    assert report.unattributed_scores == 20
+    m = _find(report, "k1", slo.SLI_QUALITY_FLOOR)
+    assert m.measured is False
+
+
+def test_the_quality_burn_rate_is_measurable_once_scores_carry_a_clock():
+    """Without a timestamp the quality burn rate is a permanent blind spot, so
+    the indicator would compute a ratio and never be able to warn about it."""
+    span = 28 * 24 * 3600 * 1000
+    good = [_score(value=1.0, last_ts_millis=int(i * span / 240)) for i in range(225)]
+    bad = [_score(value=0.0, last_ts_millis=int((225 + i) * span / 240)) for i in range(15)]
+    report = slo.compute_slo(
+        [],
+        scores=good + bad,
+        min_events=10,
+        min_burn_events=5,
+        targets={slo.SLI_QUALITY_FLOOR: 0.90},
+    )
+    m = _find(report, "agent://acme.example/support/bot", slo.SLI_QUALITY_FLOOR)
+    assert m.burn_events_seen > 0, "the rate must actually have been measured"
+    assert m.burn_rate > 1.0
+    assert m.trigger in (slo.TRIGGER_SLOW_BURN, slo.TRIGGER_FAST_BURN)
+
+
+def test_no_scores_supplied_leaves_the_report_exactly_as_it_was():
+    """The argument is optional and its absence changes nothing, including the
+    two new counters, which must read zero rather than None."""
+    report = slo.compute_slo(_runs(40), min_events=10)
+    assert report.total_scores == 0
+    assert report.unattributed_scores == 0
+    m = _find(report, "agent://acme.example/support/bot", slo.SLI_QUALITY_FLOOR)
+    assert m.measured is False

@@ -264,13 +264,41 @@ class Score:
 
 @dataclass
 class EvalRun:
-    """One execution of an EvalSet against one model."""
+    """One execution of an EvalSet against one model.
+
+    Args:
+        agent_id: Whose run this was, as an Agent Passport id
+            (``agent://<trust-domain>/<name>``), or None when nobody said.
+
+            The subject of a run is the AGENT and not the case, and that is
+            a claim about this type rather than a convenience. A run holds
+            one `model`, `cli.run_eval` drives every case through one
+            adapter, and `cli._cmd_eval` already stamps one `--agent-id`
+            onto every event the run emits and onto its OTLP span. There has
+            never been a place in this shape to say "case c1 was agent A and
+            case c2 was agent B", so a per-score subject would be a column
+            nothing in this repository could fill.
+
+            It was known at the moment the run was written and was thrown
+            away, which is the whole reason `slo.SLI_QUALITY_FLOOR` reported
+            itself unmeasured until 2026-08-26: a score could not be joined
+            to a fleet subject, so an entire indicator was dark for a
+            missing column rather than for missing data.
+
+            None and `""` both mean "no subject" and `store` keeps one
+            spelling of it. Never a fabricated one: not the model, not a
+            placeholder, not the first subject the store happens to hold.
+            An unattributed score is counted by `slo.compute_slo` and put in
+            nobody's numbers, because a fleet must not score better for
+            being less identified.
+    """
 
     id: str
     model: str
     started_at: datetime
     finished_at: datetime | None = None
     scores: list[Score] = field(default_factory=list)
+    agent_id: str | None = None
 
     @property
     def mean_score(self) -> float:
@@ -445,6 +473,14 @@ class SloReport:
     observed event rate. A burn-rate alert that can never trigger reports
     exactly like one that has nothing to report, which is the failure this
     estate names most often in its own tooling.
+
+    `unattributed_scores` is the same rule applied to the OTHER input. Scores
+    arrive from the eval store keyed by `agent_id`, and one written by a
+    `verdryx eval` that was never given `--agent-id` belongs to nobody. It is
+    counted here for exactly the reason above, and it is worth saying that the
+    two counters can disagree: a fleet can be well identified on the gateway
+    and badly identified in its eval store, or the reverse, and one number
+    covering both would hide which.
     """
 
     window: str
@@ -454,3 +490,9 @@ class SloReport:
     total_runs: int
     blind_spots: list[str]
     cost_reference_usd: float | None
+    #: How many supplied scores carried no subject, and how many arrived at
+    #: all. Zero and zero when no scores were supplied, which is a different
+    #: fact from scores supplied and all of them unattributed: the second
+    #: shows a non-zero `total_scores`.
+    unattributed_scores: int = 0
+    total_scores: int = 0

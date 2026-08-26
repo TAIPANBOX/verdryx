@@ -680,3 +680,274 @@ def test_eval_command_model_stub_selects_stub_adapter_no_network(
     main(["eval", str(sample_evalset_path), "--model", "stub", "--db", str(db)])
     with Store.open(db) as store:
         assert len(store.list_runs()) == 1
+
+
+# ------------------------------------------------------------------
+# The subject of an eval run, and the join it makes possible
+# ------------------------------------------------------------------
+
+
+def test_eval_command_stores_the_agent_id_it_was_already_being_given(
+    sample_evalset_path, tmp_path, agent_id
+) -> None:
+    """`--agent-id` stamped every event of the run and never reached the store.
+
+    The flag has existed since the event log did. The subject was known at the
+    moment the run was written and was thrown away, which is the whole reason
+    `quality_floor` could not be computed.
+    """
+    db = tmp_path / "store.db"
+    main(
+        [
+            "eval",
+            str(sample_evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--agent-id",
+            agent_id,
+        ]
+    )
+    with Store.open(db) as store:
+        runs = store.list_runs()
+    assert [r.agent_id for r in runs] == [agent_id]
+
+
+def test_eval_command_without_an_agent_id_stores_no_subject(sample_evalset_path, tmp_path) -> None:
+    """Never a fabricated one: not the model, not a placeholder."""
+    db = tmp_path / "store.db"
+    main(["eval", str(sample_evalset_path), "--model", "stub", "--db", str(db)])
+    with Store.open(db) as store:
+        runs = store.list_runs()
+    assert [r.agent_id for r in runs] == [None]
+
+
+def _trace_with_scores(pyarrow_and_parquet, tmp_path, agent_id, n=40):
+    """A tiny tokenfuse-shaped trace: `n` resolved runs under one agent."""
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": [f"r{i}" for i in range(n)],
+            "step": [0] * n,
+            "outcome": ["case_resolved"] * n,
+            "cost_microusd": [500] * n,
+            "decision": ["allow"] * n,
+            "agent_id": [agent_id] * n,
+            "key_id": ["k-ops"] * n,
+            "ts_millis": [1_750_000_000_000 + i * 1000 for i in range(n)],
+        }
+    )
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    pq.write_table(table, traces / "calls-00000000.parquet")
+    return traces
+
+
+def test_slo_command_joins_scores_from_the_eval_store(
+    pyarrow_and_parquet, sample_evalset_path, tmp_path, agent_id, capsys
+) -> None:
+    """End to end: eval writes the subject, slo reads it back and computes the
+    indicator that was dark."""
+    traces = _trace_with_scores(pyarrow_and_parquet, tmp_path, agent_id)
+    db = tmp_path / "store.db"
+    for _ in range(6):
+        main(
+            [
+                "eval",
+                str(sample_evalset_path),
+                "--model",
+                "stub",
+                "--db",
+                str(db),
+                "--agent-id",
+                agent_id,
+            ]
+        )
+    capsys.readouterr()
+
+    main(["slo", "--traces", str(traces), "--scores-db", str(db), "--min-events", "10"])
+    out = capsys.readouterr().out
+    assert "quality_floor" in out
+    assert "quality_floor      not measured" not in out
+
+
+def test_slo_command_counts_scores_no_subject_could_be_found_for(
+    pyarrow_and_parquet, sample_evalset_path, tmp_path, agent_id, capsys
+) -> None:
+    """A run evaluated without `--agent-id` belongs to nobody, and the report
+    says how many rather than letting the fleet look better for it."""
+    traces = _trace_with_scores(pyarrow_and_parquet, tmp_path, agent_id)
+    db = tmp_path / "store.db"
+    main(["eval", str(sample_evalset_path), "--model", "stub", "--db", str(db)])
+    capsys.readouterr()
+
+    main(["slo", "--traces", str(traces), "--scores-db", str(db), "--min-events", "10"])
+    out = capsys.readouterr().out
+    assert "evaluated with no --agent-id and are in no subject's numbers" in out
+    assert "score(s) joined from" in out
+
+
+def test_slo_command_refuses_to_join_an_eval_store_to_a_credential(
+    pyarrow_and_parquet, tmp_path, agent_id
+) -> None:
+    """`--identity-field key_id` groups on the credential the gateway resolved.
+
+    The eval store records an agent and no credential, so there is nothing to
+    join on. Reporting `quality_floor` as unmeasured would look identical to
+    supplying no scores at all, which is the failure this plane exists to end.
+    """
+    traces = _trace_with_scores(pyarrow_and_parquet, tmp_path, agent_id)
+    db = tmp_path / "store.db"
+    with Store.open(db):
+        pass
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "slo",
+                "--traces",
+                str(traces),
+                "--scores-db",
+                str(db),
+                "--identity-field",
+                "key_id",
+            ]
+        )
+    assert exc_info.value.code == 1
+
+
+def test_slo_command_without_a_scores_db_is_unchanged(
+    pyarrow_and_parquet, tmp_path, agent_id, capsys
+) -> None:
+    """The flag is opt-in and its absence leaves the report exactly as it was."""
+    traces = _trace_with_scores(pyarrow_and_parquet, tmp_path, agent_id)
+    main(["slo", "--traces", str(traces), "--min-events", "10"])
+    out = capsys.readouterr().out
+    assert "quality_floor" in out
+    assert "not measured" in out
+
+
+# ------------------------------------------------------------------
+# The slo command's event path
+# ------------------------------------------------------------------
+
+
+def _breaching_trace(pyarrow_and_parquet, tmp_path, agent_id, good=20, bad=20):
+    """A trace whose task_success breach the interval establishes.
+
+    Twenty of forty runs escalating is far enough below 0.95 that the Wilson
+    upper bound clears the target, so `burn_events` has something to emit and
+    a test of the emitter is testing the emitter rather than the bar.
+    """
+    pa, pq = pyarrow_and_parquet
+    n = good + bad
+    table = pa.table(
+        {
+            "run_id": [f"r{i}" for i in range(n)],
+            "step": [0] * n,
+            "outcome": ["case_resolved"] * good + ["escalated"] * bad,
+            "cost_microusd": [500] * n,
+            "decision": ["allow"] * n,
+            "agent_id": [agent_id] * n,
+            "key_id": [""] * n,
+            "ts_millis": [1_750_000_000_000 + i * 1000 for i in range(n)],
+        }
+    )
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    pq.write_table(table, traces / "calls-00000000.parquet")
+    return traces
+
+
+def test_slo_command_writes_the_burn_events_it_counted(
+    pyarrow_and_parquet, tmp_path, agent_id, capsys
+) -> None:
+    """`--events` had never written a line.
+
+    `_cmd_slo` called `resolve_events_path(args.events, config)` with two
+    arguments where the function takes one, so every invocation carrying the
+    flag died with a TypeError after printing the count of events it was
+    about to send. Found by running the command against a real tokenfuse
+    trace on 2026-08-26; no unit test had ever passed the flag.
+    """
+    traces = _breaching_trace(pyarrow_and_parquet, tmp_path, agent_id)
+    events_path = tmp_path / "events.ndjson"
+    main(
+        [
+            "slo",
+            "--traces",
+            str(traces),
+            "--min-events",
+            "10",
+            "--events",
+            str(events_path),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "slo_burn event(s) to emit" in out
+    lines = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert lines, "the command counted events and wrote none"
+    assert {e["type"] for e in lines} == {"slo_burn"}
+    assert {e["agent_id"] for e in lines} == {agent_id}
+    assert f"emitted to {events_path}" in out
+
+
+def test_slo_command_takes_the_events_path_from_the_environment(
+    pyarrow_and_parquet, tmp_path, agent_id, monkeypatch, capsys
+) -> None:
+    """The env var is the other half of the same flag, and it went through the
+    same broken call."""
+    traces = _breaching_trace(pyarrow_and_parquet, tmp_path, agent_id)
+    events_path = tmp_path / "from-env.ndjson"
+    monkeypatch.setenv("VERDRYX_EVENTS_PATH", str(events_path))
+    main(["slo", "--traces", str(traces), "--min-events", "10"])
+    capsys.readouterr()
+    lines = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert lines
+    assert {e["type"] for e in lines} == {"slo_burn"}
+
+
+def test_slo_command_with_no_events_path_writes_nothing(
+    pyarrow_and_parquet, tmp_path, agent_id, monkeypatch, capsys
+) -> None:
+    """Events stay opt-in: no flag and no env var writes no file at all."""
+    monkeypatch.delenv("VERDRYX_EVENTS_PATH", raising=False)
+    traces = _breaching_trace(pyarrow_and_parquet, tmp_path, agent_id)
+    main(["slo", "--traces", str(traces), "--min-events", "10"])
+    out = capsys.readouterr().out
+    assert "slo_burn event(s) to emit" in out
+    assert "emitted to" not in out
+    assert not list(tmp_path.glob("*.ndjson"))
+
+
+def test_slo_command_counts_runs_that_carry_no_identity(
+    pyarrow_and_parquet, tmp_path, agent_id, capsys
+) -> None:
+    """The older half of the same rule, at the same surface.
+
+    This block printed nothing under test until 2026-08-26, when the score
+    counter was added beside it and tested: one of the two lines that keep a
+    fleet from looking better for being less identified was executed by no
+    test at all. Verified against a planted fault, since it can never be red
+    against code that already has the line.
+    """
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": [f"r{i}" for i in range(30)],
+            "step": [0] * 30,
+            "outcome": ["case_resolved"] * 30,
+            "cost_microusd": [500] * 30,
+            "decision": ["allow"] * 30,
+            "agent_id": [agent_id] * 20 + [""] * 10,
+            "key_id": [""] * 30,
+            "ts_millis": [1_750_000_000_000 + i * 1000 for i in range(30)],
+        }
+    )
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    pq.write_table(table, traces / "calls-00000000.parquet")
+
+    main(["slo", "--traces", str(traces), "--min-events", "10"])
+    out = capsys.readouterr().out
+    assert "10 run(s) (33.3%) carry no agent_id and are in no subject's numbers" in out

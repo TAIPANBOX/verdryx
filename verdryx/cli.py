@@ -9,6 +9,7 @@ Usage::
                    [--events PATH] [--agent-id ID]
     verdryx cost-per-correct --input <ndjson-or-csv-or-parquet>
     verdryx cost-per-correct --traces <dir-of-parquet-segments>
+    verdryx slo --traces <dir-of-parquet-segments> [--scores-db PATH]
     verdryx version
 
 `--model stub` (eval) selects StubLLMAdapter instead of a real Anthropic
@@ -92,6 +93,7 @@ def run_eval(
     adapter: LLMAdapter,
     *,
     model: str,
+    agent_id: str | None = None,
     graders: dict[GraderKind, Grader | ToolTraceGrader] | None = None,
 ) -> EvalRun:
     """Grade every case in `evalset` and return the resulting EvalRun.
@@ -114,6 +116,12 @@ def run_eval(
     alongside whatever the grader itself reports, so EvalRun.total_cost_usd
     reflects the run's full spend, not just an LLM_JUDGE grader's
     judge-call cost.
+
+    `agent_id` is whose run this is, and it goes onto the EvalRun rather than
+    only onto the events the run emits. That is what lets `verdryx slo` join a
+    score back to a fleet subject at all: the eval store and a tokenfuse trace
+    share no run identity, so the subject is the only join there is. None when
+    the caller did not say, and never inferred from anything else.
     """
     graders = graders if graders is not None else build_graders(judge_adapter=adapter)
     run_id = str(uuid.uuid4())
@@ -165,7 +173,18 @@ def run_eval(
 
     finished_at = datetime.now(tz=UTC)
     return EvalRun(
-        id=run_id, model=model, started_at=started_at, finished_at=finished_at, scores=scores
+        id=run_id,
+        model=model,
+        started_at=started_at,
+        finished_at=finished_at,
+        scores=scores,
+        # Carried through so the run KEEPS the subject it is already being
+        # described by. `_cmd_eval` has stamped this same value onto every
+        # event and span of the run since the event log existed, and dropped
+        # it on the way to the store, which is why `slo`'s quality_floor had
+        # nothing to join on. Never defaulted to the model or to anything
+        # else: a run nobody attributed stays unattributed.
+        agent_id=agent_id,
     )
 
 
@@ -180,7 +199,7 @@ def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
     except ValueError as e:
         _die(str(e))
     adapter = _build_adapter(args.model, config)
-    run = run_eval(evalset, adapter, model=args.model)
+    run = run_eval(evalset, adapter, model=args.model, agent_id=args.agent_id)
 
     db_path = args.db or config.db_path
     with Store.open(db_path) as store:
@@ -232,7 +251,8 @@ def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
         )
 
     try:
-        print(f"\nEval run {run.id}  (model={run.model}, db={db_path})\n")
+        subject = f", agent={run.agent_id}" if run.agent_id else ", no agent id"
+        print(f"\nEval run {run.id}  (model={run.model}{subject}, db={db_path})\n")
         if not run.scores:
             print("  (no cases)\n")
             return
@@ -376,9 +396,35 @@ def _cmd_cost_per_correct(args: argparse.Namespace, _config: Config) -> None:
     )
 
 
+def _scores_from_store(args: argparse.Namespace) -> list[dict[str, Any]] | None:
+    """The eval store's scores, keyed by the subject each run was stamped with.
+
+    Refuses outright when the report is grouped by `key_id`. That grouping is
+    the sound one for anything enforced, because the gateway resolves a
+    credential server-side and a caller cannot move off it, but the eval store
+    records an agent and no credential: there is nothing to join on. Reporting
+    quality_floor as unmeasured instead would look identical to supplying no
+    scores at all, and an operator who passed the flag would have no way to
+    tell that it did nothing.
+    """
+    if not args.scores_db:
+        return None
+    if args.identity_field != slo.IDENTITY_AGENT_ID:
+        _die(
+            f"--scores-db cannot be joined to a report grouped by "
+            f"{args.identity_field!r}. Scores are stamped with the agent id "
+            f"`verdryx eval --agent-id` was given; the eval store records no "
+            f"credential, so there is nothing to attribute them to. Group by "
+            f"{slo.IDENTITY_AGENT_ID} for this join, or drop --scores-db."
+        )
+    with Store.open(args.scores_db) as store:
+        return store.score_records()
+
+
 def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
     source = args.traces if args.traces else args.input
     records = load_run_records(source)
+    scores = _scores_from_store(args)
     targets = {}
     for name in slo.SLI_NAMES:
         value = getattr(args, f"target_{name}", None)
@@ -386,6 +432,7 @@ def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
             targets[name] = value
     report = slo.compute_slo(
         records,
+        scores=scores,
         identity_field=args.identity_field,
         window=args.window,
         targets=targets or None,
@@ -412,6 +459,17 @@ def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
         print(
             f"  {report.unattributed_runs} run(s) ({share:.1%}) carry no "
             f"{report.identity_field} and are in no subject's numbers"
+        )
+    if report.total_scores:
+        print(f"  {report.total_scores} score(s) joined from {args.scores_db}")
+    if report.unattributed_scores:
+        # The same sentence for the same reason, about the other input. A
+        # fleet well identified on the gateway can be badly identified in its
+        # eval store, so one line covering both would hide which.
+        share = report.unattributed_scores / report.total_scores if report.total_scores else 0.0
+        print(
+            f"  {report.unattributed_scores} score(s) ({share:.1%}) come from a run "
+            f"evaluated with no --agent-id and are in no subject's numbers"
         )
 
     for subject, measurements in report.subjects.items():
@@ -443,8 +501,23 @@ def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
         f"\n  {len(payloads)} slo_burn event(s) to emit "
         f"(exhausted and fast burn only; a slow burn is reported, never alerted)"
     )
-    if args.events or config.events_path:
-        log = EventLog(resolve_events_path(args.events, config))
+    # Resolved once, and with the one argument the function takes. This block
+    # asked the same question twice and got the arity wrong both times: it
+    # guarded on `args.events or config.events_path` and then called
+    # `resolve_events_path(args.events, config)`, so every invocation carrying
+    # `--events` died with a TypeError immediately after printing the count of
+    # events it was about to send. Nothing caught it, because no test had ever
+    # passed the flag; it was found by running the command against a real
+    # tokenfuse trace on 2026-08-26.
+    #
+    # The guard is gone with it, and not only because it was redundant.
+    # `config` snapshots the environment at startup and `resolve_events_path`
+    # reads it live, so the two could disagree about whether events are on at
+    # all, and the shape of the disagreement is a command that says it will
+    # emit and then does not.
+    events_path = resolve_events_path(args.events)
+    if events_path is not None:
+        log = EventLog(events_path)
         sent = 0
         refused = 0
         for payload in payloads:
@@ -454,7 +527,7 @@ def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
                 continue
             log.emit("slo_burn", agent_id=subject, data=payload)
             sent += 1
-        print(f"  {sent} emitted to {resolve_events_path(args.events, config)}")
+        print(f"  {sent} emitted to {events_path}")
         if refused:
             print(
                 f"  {refused} not emitted: the subject is a {report.identity_field} "
@@ -628,6 +701,17 @@ def _build_parser() -> argparse.ArgumentParser:
             default=None,
             help=f"objective for {name} (default: {slo.DEFAULT_TARGET})",
         )
+    p_slo.add_argument(
+        "--scores-db",
+        metavar="PATH",
+        default=None,
+        help=(
+            "SQLite eval store to take per-run scores from, so quality_floor "
+            "can be computed. Joined on the agent id `verdryx eval --agent-id` "
+            "stamped onto each run: the trace and the eval store share no run "
+            "identity, so the subject is the only join there is"
+        ),
+    )
     p_slo.add_argument(
         "--events",
         metavar="PATH",

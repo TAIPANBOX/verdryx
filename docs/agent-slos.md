@@ -57,6 +57,28 @@ We landed on four. Each one is a question an operator actually asks.
 `quality_floor`: was the run's score at or above a threshold. Note that this
 is a floor and a count, not a mean, for the reason above.
 
+This one shipped dark and was measurable a week later, and the reason is
+worth reading because it was not a missing feature. The trace has no score in
+it: TokenFuse records what a call cost and how it was decided, never how good
+the answer was. The scores were in our own eval store, and the two had no run
+identity in common, so nothing could be joined. The store's `eval_runs` table
+carried no subject either, which meant a score could not even be attributed to
+an agent, and a whole indicator was reporting itself unmeasured because of a
+missing column rather than because of missing data.
+
+The fix was one column and one flag. `verdryx eval --agent-id` had existed
+since the event log did, and was stamping the subject onto every event of a
+run while dropping it on the way to the store. It now goes onto the run, and
+`verdryx slo --scores-db` joins on it. The unit is one CASE and not one eval
+run: a case is one thing a person asked the agent to do, and thresholding a
+run's mean would hide exactly the distribution a floor exists to price.
+
+The join is the agent and cannot be anything else. Group the report by
+`key_id`, which is the sound key for anything enforced, and there is nothing
+to join on, because the eval store records an agent and no credential. The
+command refuses rather than reporting quality as unmeasured, since that would
+look identical to passing no scores at all.
+
 `containment`: did anything have to stop this run. Any refusal counts, whether
 it came from the budget breaker or from the policy plane.
 
