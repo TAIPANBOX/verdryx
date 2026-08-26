@@ -213,6 +213,85 @@ def test_delegation_chain_past_the_spec_depth_is_rejected(agent_id, event_schema
         jsonschema.validate(instance=event(33), schema=event_schema)
 
 
+def test_a_delegation_proof_is_checked_and_not_merely_carried(agent_id, event_schema) -> None:
+    """SPEC Sec 5.2's `delegation_proof` is optional, and where it is present
+    the vendored copy has to hold its shape rather than wave it through.
+
+    The envelope is `additionalProperties: true`, so before this object existed
+    any value at all under this key validated. That is the same defect the
+    maxItems test above was written for: a vendored copy that has quietly lost a
+    constraint reports that it checked a line against the wire contract, and did
+    not.
+
+    Four members and no others. The field names a proof an auditor can find
+    (`jti`, `iss`), says who was holding it (`jkt`), and says when it stopped
+    being one (`exp`). A proof missing `jkt` is a delegation nobody can
+    attribute and must not pass as one, and a proof carrying the token itself is
+    the thing SPEC Sec 5.2 exists to prevent: a live credential written into a
+    replicated, hash-chained record. `additionalProperties: false` is what
+    refuses it, so the refusal is asserted here rather than assumed.
+    """
+
+    def event(**extra: Any) -> dict[str, Any]:
+        return {
+            "schema": "taipanbox.dev/agent-event/v0.2",
+            "ts": "2026-08-26T14:02:09.000Z",
+            "source": "verdryx",
+            "type": "eval_run",
+            "agent_id": agent_id,
+            "on_behalf_of": ["user://acme.example/alice", agent_id],
+            **extra,
+        }
+
+    proof = {
+        "jti": "01J9Z0K7Q0000000000000000",
+        "jkt": "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs",
+        "iss": "https://idryx.acme.example",
+        "exp": 1787654400,
+    }
+
+    # Optional, and absent means NOT proven rather than proven elsewhere.
+    jsonschema.validate(instance=event(), schema=event_schema)
+    jsonschema.validate(instance=event(delegation_proof=proof), schema=event_schema)
+
+    for missing in ("jti", "jkt", "iss", "exp"):
+        partial = {k: v for k, v in proof.items() if k != missing}
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(instance=event(delegation_proof=partial), schema=event_schema)
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            instance=event(delegation_proof={**proof, "token": "eyJhbGciOiJFUzI1NiJ9.e30.sig"}),
+            schema=event_schema,
+        )
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            instance=event(delegation_proof={**proof, "exp": "2026-08-26T14:02:09Z"}),
+            schema=event_schema,
+        )
+
+
+def test_verdryx_writes_no_delegation_proof_because_it_has_none(tmp_path, agent_id) -> None:
+    """Absent is the correct value here, and it is worth a test rather than a
+    comment.
+
+    SPEC Sec 5.2 reads absence as NOT proven, never as proven somewhere else, so
+    an emitter that writes the field is asserting it verified an RFC 8693 token.
+    `EventLog.emit` builds a fixed envelope out of an event type, an agent id
+    and a data dict: it holds no delegation chain and no token, so it has
+    nothing to assert. This goes red the day somebody adds the key without the
+    verification behind it, which is the direction that mistake travels.
+    """
+    events_path = tmp_path / "events.ndjson"
+    log = EventLog(events_path)
+    log.emit("eval_run", agent_id, {"model": "stub"}, run_id="run-1")
+
+    event = _read_ndjson(events_path)[0]
+    assert "delegation_proof" not in event, "verdryx verified no token, so it proves nothing"
+    assert "on_behalf_of" not in event, "and it carries no chain a proof could be about"
+
+
 # ------------------------------------------------------------------
 # prev_hash chain (SPEC.md Sec 6.5)
 # ------------------------------------------------------------------
