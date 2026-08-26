@@ -39,7 +39,7 @@ import csv
 import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from verdryx.models import CostPerOutcomeReport, OutcomeCost
 
@@ -67,6 +67,32 @@ _PARQUET_COST_COLUMN = "cost_microusd"
 _PARQUET_RUN_ID_COLUMN = "run_id"
 _PARQUET_STEP_COLUMN = "step"
 _PARQUET_DECISION_COLUMN = "decision"
+_PARQUET_AGENT_ID_COLUMN = "agent_id"
+_PARQUET_KEY_ID_COLUMN = "key_id"
+_PARQUET_TS_COLUMN = "ts_millis"
+
+
+class _CallRow(NamedTuple):
+    """One trace row, named rather than positional.
+
+    It was a five-wide tuple until 2026-08-26, when the SLO reader needed
+    identity and time from the same rows. Widening a positional tuple to eight
+    is how a reduction starts reading the wrong field, and the alternative,
+    a second reader in `slo.py` doing its own reduction, is the drift this
+    repository was already bitten by once: verdryx held seven of tokenfuse's
+    block reasons while tokenfuse had nine, and for eleven days avoided
+    estimates were counted as real money. One reduction, named fields.
+    """
+
+    run_id: str | None
+    step: int
+    outcome: str
+    cost_usd: float
+    decision: str
+    agent_id: str
+    key_id: str
+    ts_millis: int | None
+
 
 #: The nine Breaker block-decision wire strings (tokenfuse's
 #: crates/core/src/outcomes.rs BLOCKED_DECISIONS, read off
@@ -92,9 +118,41 @@ _BLOCKED_DECISIONS = frozenset(
 )
 
 
+#: The two refusals tokenfuse writes to the trace that are NOT among the nine
+#: above, and the reason they need naming separately.
+#:
+#: `wardryx_deny` and `wardryx_hold` are written by the gateway's policy hook
+#: (tokenfuse's crates/gateway/src/proxy.rs) and both return HTTP 403, but
+#: neither is a `BreakerReason`, so neither appears in tokenfuse-core's
+#: `BLOCKED_DECISIONS` and `_is_blocked_decision` is False for both. That is
+#: correct for COST, which is what the nine are about: a blocked call's
+#: `cost_microusd` is an avoided estimate and these two rows carry zero
+#: anyway. It is wrong for any question of the form "did anything stop this
+#: run", which is exactly what the containment SLI asks, and a reliability
+#: figure built on the nine alone would report a fleet as unrestrained while
+#: the policy plane was refusing half its calls.
+#:
+#: Kept as its own frozenset rather than folded into `_BLOCKED_DECISIONS`,
+#: because widening that set would silently change what `cost_per_outcome`
+#: excludes from spend, which is a different question with a different right
+#: answer. Verdryx reads traces and does not get to redefine them
+#: (invariant 4).
+_REFUSED_DECISIONS = frozenset({"wardryx_deny", "wardryx_hold"})
+
+
 def _is_blocked_decision(decision: str) -> bool:
     """Whether `decision` is one of the nine Breaker block reasons."""
     return decision in _BLOCKED_DECISIONS
+
+
+def is_refused_decision(decision: str) -> bool:
+    """Whether `decision` means SOMETHING refused this call, by any plane.
+
+    The nine Breaker reasons plus the two Wardryx ones. This is the predicate
+    a reliability question wants; `_is_blocked_decision` is the one a cost
+    question wants, and they are deliberately different sets.
+    """
+    return decision in _BLOCKED_DECISIONS or decision in _REFUSED_DECISIONS
 
 
 def read_ndjson(path: str | Path) -> list[dict[str, Any]]:
@@ -184,8 +242,13 @@ def read_parquet(path: str | Path) -> list[dict[str, Any]]:
     Raises:
         ImportError: If pyarrow is not installed.
     """
+    return [_cost_projection(r) for r in _read_parquet_records(path)]
+
+
+def _read_parquet_records(path: str | Path) -> list[dict[str, Any]]:
+    """The shared body: read every column, reduce once."""
     pq = _pyarrow_parquet()
-    call_rows: list[tuple[str | None, int, str, float, str]] = []
+    call_rows: list[_CallRow] = []
     fallback_step = 0
     for file_path in _parquet_file_paths(path):
         table = pq.read_table(file_path)
@@ -215,6 +278,19 @@ def read_parquet(path: str | Path) -> list[dict[str, Any]]:
             if _PARQUET_DECISION_COLUMN in columns
             else None
         )
+        agent_ids = (
+            table.column(_PARQUET_AGENT_ID_COLUMN).to_pylist()
+            if _PARQUET_AGENT_ID_COLUMN in columns
+            else None
+        )
+        key_ids = (
+            table.column(_PARQUET_KEY_ID_COLUMN).to_pylist()
+            if _PARQUET_KEY_ID_COLUMN in columns
+            else None
+        )
+        timestamps = (
+            table.column(_PARQUET_TS_COLUMN).to_pylist() if _PARQUET_TS_COLUMN in columns else None
+        )
         for i in range(table.num_rows):
             outcome = (outcomes[i] if outcomes is not None else None) or ""
             run_id: str | None = run_ids[i] if run_ids is not None else None
@@ -231,13 +307,58 @@ def read_parquet(path: str | Path) -> list[dict[str, Any]]:
                 # order across every row read so far, so ordering within a
                 # run_id stays deterministic instead of undefined.
                 step = fallback_step
-            call_rows.append((run_id, step, outcome, cost_microusd / 1_000_000, decision))
+            call_rows.append(
+                _CallRow(
+                    run_id=run_id,
+                    step=step,
+                    outcome=outcome,
+                    cost_usd=cost_microusd / 1_000_000,
+                    decision=decision,
+                    # Identity and time are read where present and default to
+                    # the same empty sentinel tokenfuse writes, never to a
+                    # guess: a fabricated subject is worse than an absent one,
+                    # and `slo.py` counts the absences rather than hiding them.
+                    agent_id=(agent_ids[i] if agent_ids is not None else None) or "",
+                    key_id=(key_ids[i] if key_ids is not None else None) or "",
+                    ts_millis=(timestamps[i] if timestamps is not None else None),
+                )
+            )
             fallback_step += 1
     return _reduce_call_rows(call_rows)
 
 
+def _cost_projection(record: dict[str, Any]) -> dict[str, Any]:
+    """`read_parquet`'s documented shape, projected off the full record.
+
+    `read_parquet` says it produces `{outcome, cost_usd}` records and callers
+    compare whole dicts against that, so the reliability fields the SLO plane
+    needs are NOT bolted onto it: widening a documented return shape breaks
+    every consumer doing an equality check, which is how this was found
+    (thirteen of this repository's own tests, each comparing a whole dict).
+    `read_parquet_runs` returns the full record for callers that want it.
+    """
+    return {"outcome": record["outcome"], "cost_usd": record["cost_usd"]}
+
+
+def read_parquet_runs(path: str | Path) -> list[dict[str, Any]]:
+    """Every per-run record `read_parquet` reduces, with nothing projected away.
+
+    The same one reduction, so a cost figure and a reliability figure can
+    never describe two different scans of the same run. Adds `run_id`,
+    `agent_id`, `key_id`, `calls`, `refused_calls` and the first/last
+    `ts_millis` the run was seen at.
+
+    `refused_calls` counts the nine Breaker reasons AND the two Wardryx ones
+    (`is_refused_decision`), which is deliberately a wider set than the one
+    `cost_usd` excludes: "what did this cost" and "did anything stop this run"
+    are different questions and tokenfuse answers them with different
+    vocabularies.
+    """
+    return _read_parquet_records(path)
+
+
 def _reduce_call_rows(
-    call_rows: list[tuple[str | None, int, str, float, str]],
+    call_rows: list[_CallRow],
 ) -> list[dict[str, Any]]:
     """Reduce (run_id, step, outcome, cost_usd, decision) call rows to one
     {outcome, cost_usd} record per run_id.
@@ -258,42 +379,106 @@ def _reduce_call_rows(
     tagged call (an untagged, run_id-less row has nothing to fold into and
     never reaches this function -- see `read_parquet`).
     """
-    with_run_id: list[tuple[str, int, str, float, str]] = []
-    without_run_id: list[tuple[str, float, str]] = []
-    for run_id, step, outcome, cost_usd, decision in call_rows:
-        if run_id is not None:
-            with_run_id.append((run_id, step, outcome, cost_usd, decision))
+    with_run_id: list[_CallRow] = []
+    without_run_id: list[_CallRow] = []
+    for row in call_rows:
+        if row.run_id is not None:
+            with_run_id.append(row)
         else:
-            without_run_id.append((outcome, cost_usd, decision))
+            without_run_id.append(row)
 
     # Sort by (run_id, step), mirroring tokenfuse's
     # `ordered.sort_by(|a, b| a.run_id.cmp(&b.run_id).then(a.step.cmp(&b.step)))`,
     # then scan in that order so each run's LAST non-empty tag is whatever a
     # later (higher-step) row most recently overwrote it with, and each
     # run's total cost sums every non-blocked call regardless of its tag.
-    ordered = sorted(with_run_id, key=lambda row: (row[0], row[1]))
+    ordered = sorted(with_run_id, key=lambda row: (row.run_id or "", row.step))
     winner: dict[str, str] = {}
     total_cost: dict[str, float] = {}
-    for run_id, _step, outcome, cost_usd, decision in ordered:
-        if outcome:
-            winner[run_id] = outcome
+    # Reliability facts, accumulated in the SAME pass and by the same rule the
+    # cost total uses, so a record can never describe one scan of a run and a
+    # different scan of the same run.
+    calls: dict[str, int] = {}
+    refused: dict[str, int] = {}
+    identity: dict[str, tuple[str, str]] = {}
+    first_ts: dict[str, int | None] = {}
+    last_ts: dict[str, int | None] = {}
+    for row in ordered:
+        run_id = row.run_id or ""
+        if row.outcome:
+            winner[run_id] = row.outcome
         total_cost[run_id] = total_cost.get(run_id, 0.0) + (
-            0.0 if _is_blocked_decision(decision) else cost_usd
+            0.0 if _is_blocked_decision(row.decision) else row.cost_usd
         )
+        calls[run_id] = calls.get(run_id, 0) + 1
+        if is_refused_decision(row.decision):
+            refused[run_id] = refused.get(run_id, 0) + 1
+        # The LAST non-empty identity wins, matching how the outcome tag is
+        # resolved, so a run whose first call arrived before the identity map
+        # was consulted is described by what the gateway finally knew. An
+        # empty value never overwrites a known one, because "" is tokenfuse's
+        # unset sentinel rather than a value.
+        prev_agent, prev_key = identity.get(run_id, ("", ""))
+        identity[run_id] = (row.agent_id or prev_agent, row.key_id or prev_key)
+        if row.ts_millis is not None:
+            if first_ts.get(run_id) is None:
+                first_ts[run_id] = row.ts_millis
+            last_ts[run_id] = row.ts_millis
 
     seen: set[str] = set()
     records: list[dict[str, Any]] = []
-    for run_id, _step, _outcome, _cost_usd, _decision in with_run_id:
+    for row in with_run_id:
+        run_id = row.run_id or ""
         if run_id in seen:
             continue
         seen.add(run_id)
-        records.append({"outcome": winner.get(run_id, UNTAGGED), "cost_usd": total_cost[run_id]})
-
-    for outcome, cost_usd, decision in without_run_id:
+        agent_id, key_id = identity.get(run_id, ("", ""))
         records.append(
-            {"outcome": outcome, "cost_usd": 0.0 if _is_blocked_decision(decision) else cost_usd}
+            {
+                "outcome": winner.get(run_id, UNTAGGED),
+                "cost_usd": total_cost[run_id],
+                "run_id": run_id,
+                "agent_id": agent_id,
+                "key_id": key_id,
+                "calls": calls.get(run_id, 0),
+                "refused_calls": refused.get(run_id, 0),
+                "first_ts_millis": first_ts.get(run_id),
+                "last_ts_millis": last_ts.get(run_id),
+            }
+        )
+
+    for row in without_run_id:
+        records.append(
+            {
+                "outcome": row.outcome,
+                "cost_usd": 0.0 if _is_blocked_decision(row.decision) else row.cost_usd,
+                "run_id": "",
+                "agent_id": row.agent_id,
+                "key_id": row.key_id,
+                "calls": 1,
+                "refused_calls": 1 if is_refused_decision(row.decision) else 0,
+                "first_ts_millis": row.ts_millis,
+                "last_ts_millis": row.ts_millis,
+            }
         )
     return records
+
+
+def load_run_records(path: str | Path) -> list[dict[str, Any]]:
+    """`load_records`, but keeping every field the reduction produced.
+
+    Same dispatch on shape and extension. NDJSON and CSV pass straight
+    through, because a hand-written file carries whatever its author put in
+    it and this function must not invent the fields a Parquet trace would
+    have had.
+    """
+    p = Path(path)
+    if p.is_dir():
+        return read_parquet_runs(p)
+    suffix = p.suffix.lower()
+    if suffix in _PARQUET_SUFFIXES:
+        return read_parquet_runs(p)
+    return load_records(p)
 
 
 def load_records(path: str | Path) -> list[dict[str, Any]]:

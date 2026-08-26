@@ -177,6 +177,27 @@ py() { printf 'def edit(p, a, b):\n    s = open(p).read()\n    assert a in s, "p
 echo "=== faults each gate must catch ==="
 
 # The invariant is that installing verdryx drags in nothing but rfc8785.
+# --- the scenarios stay bound to tests ---------------------------------------
+#
+# Three faults and one non-fault. The non-fault matters as much as the others:
+# this gate greps for `def <name>(` under tests/, and a version that also
+# matched a name mentioned in prose would fire on the feature file's own
+# comments, which is how a useful gate gets deleted by whoever is unblocking CI.
+
+run_case "features-are-bound: a binding names a test that is gone" fail \
+	'./scripts/features-are-bound.sh' \
+	"$(py 'edit("features/agent-error-budget.feature", "@test:test_wilson_widens_on_a_small_sample", "@test:test_wilson_widens")')" \
+	"names no test"
+
+run_case "features-are-bound: a scenario with nothing behind it" fail \
+	'./scripts/features-are-bound.sh' \
+	"$(py 'edit("features/agent-error-budget.feature", "  # @test:test_the_error_budget_goes_negative_rather_than_clamping\n", "")')" \
+	"proves nothing"
+
+run_case "features-are-bound: a scenario renamed is still bound" pass \
+	'./scripts/features-are-bound.sh' \
+	"$(py 'edit("features/agent-error-budget.feature", "Scenario: A ratio without its sample size is not evidence", "Scenario: a ratio needs its sample size")')"
+
 run_case "one-runtime-dependency: a second runtime dependency" fail \
 	'./scripts/one-runtime-dependency.sh' \
 	"$(py 'edit("pyproject.toml", "dependencies = [\"rfc8785>=0.1.4\"]", "dependencies = [\"rfc8785>=0.1.4\", \"pyarrow>=14.0\"]")')" \
@@ -244,6 +265,11 @@ m = re.search(r"badge/tests-\d+-", s)
 assert m, "no test badge in README.md"
 open("README.md","w").write(s.replace(m.group(0), "badge/nothing-", 1))')" \
 	"nothing to compare against"
+
+run_case "features-are-bound: the subject taken away entirely" fail \
+	'./scripts/features-are-bound.sh' \
+	"$(py 'import shutil; shutil.rmtree("features")')" \
+	"not a pass"
 
 echo
 if [ -n "$(git status --porcelain)" ]; then

@@ -131,6 +131,21 @@ EVENT_SEVERITY: dict[str, Severity] = {
     "eval_run": "info",
     "quality_score": "info",
     "quality_drift": "high",
+    # An objective is missed, or its error budget is being spent fast enough
+    # that it will be. `high`, the same band as `quality_drift`, because it is
+    # the same family of fact about the same fleet and an operator who has
+    # decided one is worth a message has decided both are.
+    #
+    # ONE band for a type that covers two triggers, deliberately: severity is
+    # fixed per type here rather than chosen at the emission site, so a call
+    # site cannot misclassify, and splitting the band would mean splitting the
+    # type. What keeps that honest is that `slo.burn_events` refuses to emit a
+    # SLOW burn at all. A budget that will be gone by Friday is a real signal
+    # and it is not this one; it lives in the report and its JSON, where a
+    # dashboard reads it without waking anybody. Paging for both at one band
+    # is how an operator learns to filter the sender, which tokenfuse recorded
+    # about its own `breaker_tripped` on 2026-08-03.
+    "slo_burn": "high",
 }
 
 #: Environment variable fallback for an explicit events path.

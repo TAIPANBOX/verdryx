@@ -48,6 +48,7 @@ pytest
 ./scripts/no-paid-by-default.sh
 ./scripts/one-runtime-dependency.sh
 ./scripts/readme-numbers.sh
+./scripts/features-are-bound.sh
 ./scripts/gates-have-teeth.sh   # invariant 7; needs a clean tree and the package installed
 ```
 
@@ -120,15 +121,84 @@ an absent invariant.
    A text parser does not break loudly: it stops matching and reports success.
    The mutants that proved these gates lived in commit messages and in the
    `*(gate: ...)*` markers above, which is a record of what was true once.
-   *(gate: `scripts/gates-have-teeth.sh`, 10 cases: six real faults each gate
-   must catch, two non-faults they must not, and two subjects taken away
-   entirely. The non-fault cases are the ones worth keeping: an optional
+   *(gate: `scripts/gates-have-teeth.sh`, 14 cases: eight real faults each gate
+   must catch, three non-faults they must not, and three subjects taken away
+   entirely. It read "10 cases" until 2026-08-26, having been written once
+   while the cases kept arriving, which is invariant 6's own failure inside
+   the file that records invariant 6. Counted by running it. The non-fault cases are the ones worth keeping: an optional
    dependency imported INSIDE a function is exactly what invariant 2 allows,
    and a gate that fired on it would be deleted by whoever is unblocking CI.)*
 
    **What it does not cover.** It cannot test itself. It proves each gate
    catches the faults named in it, not every fault of that kind. It found no
    hole in any of the four.
+
+8. **A figure this plane puts in front of an operator arrives with what it
+   rests on, and an indicator it could not compute says so rather than
+   reporting a number.** The SLO layer is where this bites hardest, because
+   every one of its outputs is a small float that looks equally authoritative
+   whether it rests on four hundred runs or four.
+
+   Three shapes, each with its own way of lying quietly:
+
+   - **A ratio travels with its interval and its `n`.** Three of four runs is
+     0.75 and says nothing; three hundred of four hundred is 0.75 and says a
+     great deal. The bus is held to a higher bar than the report on purpose:
+     `slo.burn_events` emits only where the Wilson upper bound sits below the
+     target, because a report is read by somebody who can see the sample size
+     and a bus line is read by a program that cannot.
+   - **An unmeasured indicator is never a zero.** `burn_rate == 0.0` with
+     `burn_events_seen == 0` means no clock and no rate, which is the opposite
+     fact from a fleet burning nothing, and the two are identical in the
+     float. Same for an SLI below `min_events`: it reports `measured=False`
+     with a reason naming where the missing input would have come from.
+   - **A subject the envelope cannot carry is reported and not emitted.**
+     Grouping on `key_id` is the sound choice for anything enforced and
+     produces credentials, not agents; the envelope's one subject field is an
+     `agent_id` with a fixed grammar. So a key-keyed breach appears in the
+     report and never on the bus, rather than being written malformed for a
+     consumer to reject.
+   - **A run nobody can attribute is counted, never bucketed.** A fleet scores
+     better the less of it is identified either way; only one of the two says
+     so, and `SloReport.unattributed_runs` is printed beside the figures
+     rather than under them.
+
+   **Found by its own test, and worth keeping written down.** The module first
+   computed the error budget and the burn rate over the same runs, which makes
+   the rate exactly `1 - remaining`: exhaustion then wins every comparison and
+   `fast_burn` and `slow_burn` are unreachable code. A trigger that can never
+   fire reports identically to one with nothing to report. The budget now
+   looks at the whole window and the rate at a recent slice of it
+   (`BURN_WINDOW_FRACTION`), which is the SRE multi-window shape and, more to
+   the point, is two questions instead of one asked twice.
+   *(test: the thirteen scenarios in `features/agent-error-budget.feature`,
+   each bound to a named test by `scripts/features-are-bound.sh`; twenty-nine
+   tests in `tests/test_slo.py`, six of which were verified red against a
+   planted defect: the evidence bar removed, unattributed runs bucketed, the
+   cost reference taken per subject instead of over the fleet, containment
+   read off the nine Breaker reasons alone, the burn rate returned to one
+   window, and the budget clamped at zero. `gate: scripts/features-are-bound.sh`
+   holds the binding in both directions; nothing mechanical can hold whether a
+   scenario's prose still describes its test, and that limit is in the
+   script.)*
+
+9. **This plane measures and does not enforce.** `@yurii 2026-08-26`: "лише
+   вимірювання". Not a half-built state: `slo.py` writes no wardryx policy,
+   demotes nothing and gates nothing, and the reasons are structural rather
+   than a matter of effort. wardryx's PDP is a pure function of (policy set,
+   request), held by its own `scripts/decision-path-purity.sh`, so it cannot
+   read a budget and a gate would have to WRITE policy. No per-agent autonomy
+   tier exists anywhere in the estate to write into. And the budget can only
+   be keyed soundly on `key_id` while wardryx policies target `agent_id`
+   globs, which tokenfuse's own source calls "unsound as the key of a budget";
+   the join between them is the gateway's identity map, which is off by
+   default. A gate built over that seam would look identical whether it held
+   or not.
+
+   Adding enforcement is a decision for the user, not a convenience, and it
+   belongs in the same list as adding a runtime dependency.
+   *(not enforced; held by this file and by there being no policy-writing code
+   to find)*
 
 ## Decisions that have no gate yet
 
@@ -187,6 +257,8 @@ Stop and tell the user, then wait, when a task hits any of these:
 - Any change to which graders run by default, or to anything that could reach a
   paid provider.
 - Any change to canonicalization or to the event envelope.
+- Anything that would make this plane ENFORCE rather than measure: writing a
+  wardryx policy, demoting an agent, or gating an action on a budget.
 - Cutting a release or publishing to PyPI.
 
 Routine work: tests, doc comments, new deterministic graders, report
