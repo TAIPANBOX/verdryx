@@ -534,6 +534,28 @@ def compute_slo(
     a trace subject would be a fabrication; its three trace-fed indicators
     report that there were no runs at all, which is a different sentence from
     "no run carried an outcome tag" and sends a reader somewhere different.
+
+    ## What joining two streams does to the quality BURN window
+
+    @measured 2026-08-26, running `verdryx slo --traces <dir> --scores-db
+    <db>` against a live tokenfuse trace: a subject with 240 scoreless trace
+    runs and 40 stored scores computed `quality_floor` fine and reported its
+    burn rate as not measurable.
+
+    That is `_recent_burn` behaving as designed and it is worth knowing about.
+    The recent slice is a slice of TIME over every row the indicator was
+    handed, and a trace run carrying no score is a row `_sli_quality_floor`
+    cannot judge. When the scoreless runs are the newest rows, they fill the
+    slice, `judged` comes back under `min_burn_events`, and the rate is
+    reported unmeasured rather than computed off whatever survived.
+
+    Building the window out of judgeable rows only would fix that figure and
+    break something worse: "recently" would then mean a different span for
+    each indicator on the same report, one an hour and another a month, with
+    nothing on the page saying so. An unmeasured rate that `_blind_spots`
+    names is the better of the two, and the two clocks are the reason it can
+    happen at all (`store.score_records` stamps the eval run's finish time,
+    the trace stamps the gateway's settle time).
     """
     if identity_field not in IDENTITY_FIELDS:
         raise SloInputError(

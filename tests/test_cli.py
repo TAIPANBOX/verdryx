@@ -825,3 +825,96 @@ def test_slo_command_without_a_scores_db_is_unchanged(
     out = capsys.readouterr().out
     assert "quality_floor" in out
     assert "not measured" in out
+
+
+# ------------------------------------------------------------------
+# The slo command's event path
+# ------------------------------------------------------------------
+
+
+def _breaching_trace(pyarrow_and_parquet, tmp_path, agent_id, good=20, bad=20):
+    """A trace whose task_success breach the interval establishes.
+
+    Twenty of forty runs escalating is far enough below 0.95 that the Wilson
+    upper bound clears the target, so `burn_events` has something to emit and
+    a test of the emitter is testing the emitter rather than the bar.
+    """
+    pa, pq = pyarrow_and_parquet
+    n = good + bad
+    table = pa.table(
+        {
+            "run_id": [f"r{i}" for i in range(n)],
+            "step": [0] * n,
+            "outcome": ["case_resolved"] * good + ["escalated"] * bad,
+            "cost_microusd": [500] * n,
+            "decision": ["allow"] * n,
+            "agent_id": [agent_id] * n,
+            "key_id": [""] * n,
+            "ts_millis": [1_750_000_000_000 + i * 1000 for i in range(n)],
+        }
+    )
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    pq.write_table(table, traces / "calls-00000000.parquet")
+    return traces
+
+
+def test_slo_command_writes_the_burn_events_it_counted(
+    pyarrow_and_parquet, tmp_path, agent_id, capsys
+) -> None:
+    """`--events` had never written a line.
+
+    `_cmd_slo` called `resolve_events_path(args.events, config)` with two
+    arguments where the function takes one, so every invocation carrying the
+    flag died with a TypeError after printing the count of events it was
+    about to send. Found by running the command against a real tokenfuse
+    trace on 2026-08-26; no unit test had ever passed the flag.
+    """
+    traces = _breaching_trace(pyarrow_and_parquet, tmp_path, agent_id)
+    events_path = tmp_path / "events.ndjson"
+    main(
+        [
+            "slo",
+            "--traces",
+            str(traces),
+            "--min-events",
+            "10",
+            "--events",
+            str(events_path),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "slo_burn event(s) to emit" in out
+    lines = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert lines, "the command counted events and wrote none"
+    assert {e["type"] for e in lines} == {"slo_burn"}
+    assert {e["agent_id"] for e in lines} == {agent_id}
+    assert f"emitted to {events_path}" in out
+
+
+def test_slo_command_takes_the_events_path_from_the_environment(
+    pyarrow_and_parquet, tmp_path, agent_id, monkeypatch, capsys
+) -> None:
+    """The env var is the other half of the same flag, and it went through the
+    same broken call."""
+    traces = _breaching_trace(pyarrow_and_parquet, tmp_path, agent_id)
+    events_path = tmp_path / "from-env.ndjson"
+    monkeypatch.setenv("VERDRYX_EVENTS_PATH", str(events_path))
+    main(["slo", "--traces", str(traces), "--min-events", "10"])
+    capsys.readouterr()
+    lines = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert lines
+    assert {e["type"] for e in lines} == {"slo_burn"}
+
+
+def test_slo_command_with_no_events_path_writes_nothing(
+    pyarrow_and_parquet, tmp_path, agent_id, monkeypatch, capsys
+) -> None:
+    """Events stay opt-in: no flag and no env var writes no file at all."""
+    monkeypatch.delenv("VERDRYX_EVENTS_PATH", raising=False)
+    traces = _breaching_trace(pyarrow_and_parquet, tmp_path, agent_id)
+    main(["slo", "--traces", str(traces), "--min-events", "10"])
+    out = capsys.readouterr().out
+    assert "slo_burn event(s) to emit" in out
+    assert "emitted to" not in out
+    assert not list(tmp_path.glob("*.ndjson"))

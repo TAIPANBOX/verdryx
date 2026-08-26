@@ -501,8 +501,23 @@ def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
         f"\n  {len(payloads)} slo_burn event(s) to emit "
         f"(exhausted and fast burn only; a slow burn is reported, never alerted)"
     )
-    if args.events or config.events_path:
-        log = EventLog(resolve_events_path(args.events, config))
+    # Resolved once, and with the one argument the function takes. This block
+    # asked the same question twice and got the arity wrong both times: it
+    # guarded on `args.events or config.events_path` and then called
+    # `resolve_events_path(args.events, config)`, so every invocation carrying
+    # `--events` died with a TypeError immediately after printing the count of
+    # events it was about to send. Nothing caught it, because no test had ever
+    # passed the flag; it was found by running the command against a real
+    # tokenfuse trace on 2026-08-26.
+    #
+    # The guard is gone with it, and not only because it was redundant.
+    # `config` snapshots the environment at startup and `resolve_events_path`
+    # reads it live, so the two could disagree about whether events are on at
+    # all, and the shape of the disagreement is a command that says it will
+    # emit and then does not.
+    events_path = resolve_events_path(args.events)
+    if events_path is not None:
+        log = EventLog(events_path)
         sent = 0
         refused = 0
         for payload in payloads:
@@ -512,7 +527,7 @@ def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
                 continue
             log.emit("slo_burn", agent_id=subject, data=payload)
             sent += 1
-        print(f"  {sent} emitted to {resolve_events_path(args.events, config)}")
+        print(f"  {sent} emitted to {events_path}")
         if refused:
             print(
                 f"  {refused} not emitted: the subject is a {report.identity_field} "
