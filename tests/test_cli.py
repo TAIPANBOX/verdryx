@@ -918,3 +918,36 @@ def test_slo_command_with_no_events_path_writes_nothing(
     assert "slo_burn event(s) to emit" in out
     assert "emitted to" not in out
     assert not list(tmp_path.glob("*.ndjson"))
+
+
+def test_slo_command_counts_runs_that_carry_no_identity(
+    pyarrow_and_parquet, tmp_path, agent_id, capsys
+) -> None:
+    """The older half of the same rule, at the same surface.
+
+    This block printed nothing under test until 2026-08-26, when the score
+    counter was added beside it and tested: one of the two lines that keep a
+    fleet from looking better for being less identified was executed by no
+    test at all. Verified against a planted fault, since it can never be red
+    against code that already has the line.
+    """
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": [f"r{i}" for i in range(30)],
+            "step": [0] * 30,
+            "outcome": ["case_resolved"] * 30,
+            "cost_microusd": [500] * 30,
+            "decision": ["allow"] * 30,
+            "agent_id": [agent_id] * 20 + [""] * 10,
+            "key_id": [""] * 30,
+            "ts_millis": [1_750_000_000_000 + i * 1000 for i in range(30)],
+        }
+    )
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    pq.write_table(table, traces / "calls-00000000.parquet")
+
+    main(["slo", "--traces", str(traces), "--min-events", "10"])
+    out = capsys.readouterr().out
+    assert "10 run(s) (33.3%) carry no agent_id and are in no subject's numbers" in out
