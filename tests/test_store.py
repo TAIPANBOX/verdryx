@@ -265,3 +265,222 @@ def test_a_newer_store_is_refused_rather_than_misread(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="newer than this verdryx"):
         Store.open(db_path)
+
+
+# ------------------------------------------------------------------
+# The subject of a run
+# ------------------------------------------------------------------
+
+#: `eval_runs` exactly as it stood before a run had a subject. Every store
+#: written by a build before 2026-08-26 has this shape on somebody's disk, and
+#: the only honest way to test the migration is to produce one rather than to
+#: describe it.
+_PRE_SUBJECT_DDL = """
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id            TEXT PRIMARY KEY,
+    model         TEXT NOT NULL,
+    started_at    TEXT NOT NULL,
+    finished_at   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS scores (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL REFERENCES eval_runs(id),
+    case_id       TEXT NOT NULL,
+    value         REAL NOT NULL,
+    tokens        INTEGER NOT NULL DEFAULT 0,
+    cost_usd      REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS baselines (
+    id            TEXT PRIMARY KEY,
+    eval_run_id   TEXT NOT NULL REFERENCES eval_runs(id),
+    mean_score    REAL NOT NULL,
+    created_at    TEXT NOT NULL,
+    label         TEXT NOT NULL DEFAULT ''
+);
+"""
+
+
+def _write_pre_subject_store(db_path) -> None:
+    """A store as an older verdryx left it: no `agent_id`, one run, two scores."""
+    raw = sqlite3.connect(str(db_path))
+    try:
+        raw.executescript(_PRE_SUBJECT_DDL)
+        raw.execute(
+            "INSERT INTO eval_runs (id, model, started_at, finished_at) VALUES (?, ?, ?, ?)",
+            ("old-run", "stub", "2026-07-01T00:00:00+00:00", "2026-07-01T00:01:00+00:00"),
+        )
+        raw.executemany(
+            "INSERT INTO scores (run_id, case_id, value, tokens, cost_usd) VALUES (?, ?, ?, ?, ?)",
+            [("old-run", "c1", 1.0, 10, 0.01), ("old-run", "c2", 0.5, 20, 0.02)],
+        )
+        raw.execute("PRAGMA user_version = 1")
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_an_eval_run_round_trips_its_subject(tmp_path) -> None:
+    """The subject is the whole point of the column: it has to survive a write."""
+    db_path = tmp_path / "store.db"
+    run = _run()
+    run.agent_id = "agent://acme.example/support/bot"
+    with Store.open(db_path) as store:
+        store.save_run(run)
+    with Store.open(db_path) as store:
+        loaded = store.load_run("r1")
+    assert loaded is not None
+    assert loaded.agent_id == "agent://acme.example/support/bot"
+
+
+def test_a_store_written_before_the_subject_existed_still_opens(tmp_path) -> None:
+    """CREATE TABLE IF NOT EXISTS does not add a column to a table that exists.
+
+    An old store on somebody's disk therefore reaches the new build one column
+    short, and if nothing widens it every read of `agent_id` is an
+    OperationalError on a file that was perfectly good yesterday.
+    """
+    db_path = tmp_path / "store.db"
+    _write_pre_subject_store(db_path)
+    with Store.open(db_path) as store:
+        loaded = store.load_run("old-run")
+    assert loaded is not None
+    assert [s.case_id for s in loaded.scores] == ["c1", "c2"]
+
+
+def test_a_row_written_before_the_column_reads_back_as_no_subject(tmp_path) -> None:
+    """Not as a fabricated one.
+
+    The other half of the migration, and the half that fails quietly. A row
+    that predates the column cannot know whose run it was, and anything that
+    filled it in (the model name, a default agent, the first subject seen)
+    would attribute somebody's runs to an agent that never made them.
+    """
+    db_path = tmp_path / "store.db"
+    _write_pre_subject_store(db_path)
+    with Store.open(db_path) as store:
+        loaded = store.load_run("old-run")
+    assert loaded is not None
+    assert loaded.agent_id is None
+
+
+def test_the_migration_does_not_lose_the_baselines_either(tmp_path) -> None:
+    """A migration that rebuilt `eval_runs` would take its foreign keys with it."""
+    db_path = tmp_path / "store.db"
+    _write_pre_subject_store(db_path)
+    raw = sqlite3.connect(str(db_path))
+    raw.execute(
+        "INSERT INTO baselines (id, eval_run_id, mean_score, created_at, label) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("b-old", "old-run", 0.75, "2026-07-02T00:00:00+00:00", "v1"),
+    )
+    raw.commit()
+    raw.close()
+
+    with Store.open(db_path) as store:
+        baseline = store.get_baseline("b-old")
+        assert baseline is not None
+        assert baseline.eval_run_id == "old-run"
+        assert store.load_run("old-run") is not None
+
+
+def test_the_migration_runs_once_and_re_opening_is_still_idempotent(tmp_path) -> None:
+    """A second open must not try to add the column again, which SQLite refuses."""
+    db_path = tmp_path / "store.db"
+    _write_pre_subject_store(db_path)
+    for _ in range(3):
+        with Store.open(db_path) as store:
+            assert store.load_run("old-run") is not None
+
+
+def test_an_empty_subject_is_stored_as_the_one_spelling_of_absence(tmp_path) -> None:
+    """`""` and `None` both mean "no subject", and the column keeps one of them.
+
+    Two spellings of absence in one column is how a later `WHERE agent_id IS
+    NULL` silently misses half the rows it was written for.
+    """
+    db_path = tmp_path / "store.db"
+    run = _run()
+    run.agent_id = ""
+    with Store.open(db_path) as store:
+        store.save_run(run)
+    raw = sqlite3.connect(str(db_path))
+    try:
+        stored = raw.execute("SELECT agent_id FROM eval_runs WHERE id = 'r1'").fetchone()[0]
+    finally:
+        raw.close()
+    assert stored is None
+    with Store.open(db_path) as store:
+        loaded = store.load_run("r1")
+    assert loaded is not None
+    assert loaded.agent_id is None
+
+
+def test_list_runs_carries_the_subject_too() -> None:
+    """`load_run` and `list_runs` read the same table and must agree about it."""
+    with Store.open(":memory:") as store:
+        run = _run()
+        run.agent_id = "agent://acme.example/support/bot"
+        store.save_run(run)
+        listed = store.list_runs()
+    assert [r.agent_id for r in listed] == ["agent://acme.example/support/bot"]
+
+
+# ------------------------------------------------------------------
+# Score records, the join the SLO plane could not make
+# ------------------------------------------------------------------
+
+
+def test_score_records_carry_one_record_per_case_under_the_run_s_subject() -> None:
+    """One record per CASE, not per run.
+
+    A case is the unit a person asked the agent to do, which is the unit
+    `slo` counts. Thresholding a run's mean would hide exactly the
+    distribution the floor exists to price.
+    """
+    with Store.open(":memory:") as store:
+        run = _run()
+        run.agent_id = "agent://acme.example/support/bot"
+        store.save_run(run)
+        records = store.score_records()
+    assert [r["score"] for r in records] == [1.0, 0.5]
+    assert {r["agent_id"] for r in records} == {"agent://acme.example/support/bot"}
+
+
+def test_score_records_from_an_unattributed_run_carry_an_empty_subject() -> None:
+    """Empty, never absent and never guessed: `slo` counts these and buckets
+    none of them."""
+    with Store.open(":memory:") as store:
+        store.save_run(_run())
+        records = store.score_records()
+    assert records
+    assert {r["agent_id"] for r in records} == {""}
+
+
+def test_score_records_carry_the_run_s_clock() -> None:
+    """Without a timestamp the quality burn rate can never fire, and a warning
+    that can never fire reports exactly like one with nothing to report."""
+    with Store.open(":memory:") as store:
+        run = _run()
+        run.agent_id = "agent://acme.example/support/bot"
+        store.save_run(run)
+        records = store.score_records()
+    finished_millis = int(datetime(2026, 7, 1, 0, 1, tzinfo=UTC).timestamp() * 1000)
+    assert {r["last_ts_millis"] for r in records} == {finished_millis}
+
+
+def test_score_records_fall_back_to_the_start_when_a_run_never_finished() -> None:
+    """An unfinished run still happened at a knowable time."""
+    with Store.open(":memory:") as store:
+        store.save_run(
+            EvalRun(
+                id="r1",
+                model="stub",
+                started_at=datetime(2026, 7, 1, tzinfo=UTC),
+                agent_id="agent://acme.example/support/bot",
+                scores=[Score(case_id="c1", value=1.0)],
+            )
+        )
+        records = store.score_records()
+    assert records[0]["last_ts_millis"] == int(datetime(2026, 7, 1, tzinfo=UTC).timestamp() * 1000)

@@ -101,6 +101,55 @@ Feature: When is an agent reliable enough
     Then the report says it was not measured and why
     And the reason names where the scores would have to come from
 
+  # @test:test_an_eval_run_round_trips_its_subject
+  Scenario: A run remembers whose run it was
+    Given an eval run of an agent the operator named
+    When the run is stored
+    Then the store keeps the agent it was named with
+    And a later report can tell whose scores those are
+
+  # @test:test_a_store_written_before_the_subject_existed_still_opens
+  Scenario: A store written last month still opens this month
+    Given an eval store from a build before a run had a subject
+    When this build opens it
+    Then it opens, and every run and score is still there
+    And nothing had to be exported and re-imported by hand
+
+  # @test:test_a_row_written_before_the_column_reads_back_as_no_subject
+  Scenario: A run from before nobody can attribute is left unattributed
+    Given a run written before there was anywhere to record its subject
+    When it is read back
+    Then it reports no subject
+    And no plausible-looking agent has been filled in for it
+
+  # @test:test_quality_floor_computes_from_scores_supplied_beside_the_trace
+  Scenario: The indicator that shipped dark now computes
+    Given a trace of a fleet and the eval scores for the same agents
+    When quality is measured
+    Then the fraction of runs meeting the floor is reported
+    And it rests on the same subject the rest of the report is grouped by
+
+  # @test:test_a_score_with_no_subject_is_counted_and_never_bucketed
+  Scenario: A fleet does not score better for an unlabelled evaluation
+    Given some scores from runs nobody named an agent for
+    When the report is produced
+    Then those scores are in no subject's numbers
+    And the report says how many there were
+
+  # @test:test_a_subject_known_only_from_its_scores_still_appears
+  Scenario: An agent evaluated offline is still in the report
+    Given an agent with eval scores and no traffic on the trace
+    When the report is produced
+    Then it has a row of its own with its quality measured
+    And the indicators that need a trace say there were no runs at all
+
+  # @test:test_slo_command_refuses_to_join_an_eval_store_to_a_credential
+  Scenario: A join that cannot be sound is refused rather than reported empty
+    Given the report is grouped by the credential the gateway resolved
+    When an eval store is offered as the source of scores
+    Then the command refuses and says why
+    And it does not quietly report quality as unmeasured instead
+
   # @test:test_a_key_keyed_subject_is_reported_and_never_emitted
   Scenario: The identity that is safe to gate on is not one the bus can carry
     Given the fleet is grouped by the credential rather than by the agent name

@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB.svg)
-![tests](https://img.shields.io/badge/tests-329-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-354-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/phase-1%20(mvp)-success.svg)
 
@@ -315,6 +315,25 @@ budget left on each and the rate it is going.
 ```sh
 verdryx slo --traces "$TOKENFUSE_DATA_DIR"
 ```
+
+Three of the four are computed from the trace alone. The fourth,
+`quality_floor`, needs a score per run, and a TokenFuse trace records what a
+call cost and how it was decided, never how good the answer was. Those scores
+are in Verdryx's own eval store, and the two share no run identity: a
+TokenFuse `run_id` belongs to a piece of gateway traffic, an eval run id to a
+batch of cases that never went through a gateway. The join is the agent, and
+nothing else:
+
+```sh
+verdryx eval cases.json --model stub --db quality.db \
+    --agent-id agent://acme.example/support/bot
+verdryx slo --traces "$TOKENFUSE_DATA_DIR" --scores-db quality.db
+```
+
+A run evaluated with no `--agent-id` belongs to nobody. Its scores are counted
+and put in no subject's numbers, the same rule the report already applies to a
+trace run carrying no identity, because a fleet must not score better for
+being less identified.
 
 It measures. It does not enforce: no policy is written, no agent is demoted,
 and there is no autonomy tier in this stack to demote one into. The reasons

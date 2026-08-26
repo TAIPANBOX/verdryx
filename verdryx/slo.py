@@ -325,10 +325,19 @@ UNMEASURED_REASONS = {
         "no run carried an outcome tag: the gateway records the "
         "X-Fuse-Outcome header verbatim and it was never sent"
     ),
+    # This reason described a limitation that no longer exists, and a reason
+    # that has stopped being true is worse than none: it sends a reader to
+    # close a gap already closed. Until 2026-08-26 the eval store's
+    # `eval_runs` table carried no subject, so a score could not be attributed
+    # to a fleet at all and the indicator was dark for a missing COLUMN rather
+    # than for missing data. It now names the two commands that carry a score
+    # from where it is produced to where it is read.
     SLI_QUALITY_FLOOR: (
-        "no per-run score was supplied. Scores live in verdryx's own eval "
-        "store, whose eval_runs table carries no agent_id, so they cannot be "
-        "joined to a fleet subject from the store alone; pass them explicitly"
+        "no per-run score reached this subject. Scores live in verdryx's own "
+        "eval store: `verdryx eval --agent-id <id>` stamps the subject onto "
+        "the run, and `verdryx slo --scores-db <path>` joins them back. A run "
+        "evaluated with no --agent-id belongs to nobody and is counted as an "
+        "unattributed score rather than filed under somebody"
     ),
     SLI_CONTAINMENT: "no run carried a call count, so nothing says what was refused",
     SLI_COST_DISCIPLINE: (
@@ -392,6 +401,34 @@ def _recent_burn(
     return (burn_rate(observed_recent, target), len(judged))
 
 
+def _unmeasured_reason(
+    sli: str,
+    runs: list[Mapping[str, Any]],
+    total: int,
+    cfg: Mapping[str, Any],
+) -> str:
+    """Which of the three absences this is, said in the words for that one.
+
+    Three, not two, and the third arrived with the eval-store join. A subject
+    can now be known ONLY from its scores (an agent evaluated offline whose
+    gateway traffic nobody tagged), and for such a subject every trace-fed
+    indicator has no runs at all. Reporting "no run carried an outcome tag"
+    there is the wrong diagnosis: it sends an operator to look at a header
+    they never had a chance to send, on runs that were never in the file.
+    """
+    if not runs:
+        return (
+            "no runs at all for this subject in this window: it is known here "
+            "only from its scores, so nothing in the trace describes it"
+        )
+    if total == 0:
+        return UNMEASURED_REASONS[sli]
+    return (
+        f"{total} eligible run(s), below the {cfg['min_events']} this "
+        f"report will compute a ratio from"
+    )
+
+
 def evaluate_sli(
     runs: list[Mapping[str, Any]],
     sli: str,
@@ -422,12 +459,7 @@ def evaluate_sli(
             burn_events_seen=0,
             trigger=None,
             measured=False,
-            unmeasured_reason=(
-                UNMEASURED_REASONS[sli]
-                if total == 0
-                else f"{total} eligible run(s), below the {cfg['min_events']} this "
-                f"report will compute a ratio from"
-            ),
+            unmeasured_reason=_unmeasured_reason(sli, runs, total, cfg),
         )
 
     observed = good / total
@@ -453,6 +485,7 @@ def evaluate_sli(
 def compute_slo(
     records: Iterable[Mapping[str, Any]],
     *,
+    scores: Iterable[Mapping[str, Any]] | None = None,
     identity_field: str = IDENTITY_AGENT_ID,
     window: str = "28d",
     targets: Mapping[str, float] | None = None,
@@ -472,6 +505,35 @@ def compute_slo(
     appear in NO subject. They are not dropped quietly and they are not
     bucketed under a placeholder subject: a fleet gets a better score the less
     of it is identified either way, and only one of the two says so.
+
+    ## Why `scores` is a second stream and not a column on the first
+
+    `SLI_QUALITY_FLOOR` needs a score per judged unit, and the trace has none:
+    tokenfuse records what a call cost and how it was decided, never how good
+    the answer was. The scores live in verdryx's own eval store, and the two
+    have no run identity in common. A tokenfuse `run_id` is minted by the
+    caller for a piece of gateway traffic; an eval run id is a `uuid4` minted
+    by `cli.run_eval` for a batch of cases that never went through a gateway.
+    Nothing anywhere maps one to the other.
+
+    So the join is on the SUBJECT and on nothing else, which is why a subject
+    had to exist in the eval store before this argument could. Each score
+    record carries its own identity field, exactly like a run record, and is
+    grouped the same way. That shape is deliberate rather than convenient: a
+    `{subject: [scores]}` mapping cannot carry a score that HAS no subject
+    except under a placeholder key, and a placeholder key is the bucketing
+    this report refuses to do to runs.
+
+    Both streams reach `SLI_QUALITY_FLOOR` together. A record that carries its
+    own `score` field is a legitimate input (a hand-written NDJSON export
+    does) and did not stop being one, so the denominator is every judged unit
+    from either source.
+
+    A subject present only in `scores` gets a row of its own. Dropping it
+    would be a silent loss of an agent somebody evaluated, and filing it under
+    a trace subject would be a fabrication; its three trace-fed indicators
+    report that there were no runs at all, which is a different sentence from
+    "no run carried an outcome tag" and sends a reader somewhere different.
     """
     if identity_field not in IDENTITY_FIELDS:
         raise SloInputError(
@@ -501,18 +563,27 @@ def compute_slo(
         "cost_reference": cost_reference(rows),
     }
 
-    grouped: dict[str, list[Mapping[str, Any]]] = {}
-    unattributed = 0
-    for row in rows:
-        subject = str(row.get(identity_field) or "")
-        if not subject:
-            unattributed += 1
-            continue
-        grouped.setdefault(subject, []).append(row)
+    grouped, unattributed = _group_by_subject(rows, identity_field)
+    score_rows = list(scores or ())
+    scored, unattributed_scores = _group_by_subject(score_rows, identity_field)
 
     subjects = {
-        subject: [evaluate_sli(runs, sli, subject, cfg) for sli in SLI_NAMES]
-        for subject, runs in sorted(grouped.items())
+        subject: [
+            evaluate_sli(
+                # Both streams, and only for the one indicator a score can
+                # speak to. A run carrying no `score` returns None from
+                # `_sli_quality_floor` and stays out of the denominator, so
+                # concatenating cannot double-count anything.
+                grouped.get(subject, []) + scored.get(subject, [])
+                if sli == SLI_QUALITY_FLOOR
+                else grouped.get(subject, []),
+                sli,
+                subject,
+                cfg,
+            )
+            for sli in SLI_NAMES
+        ]
+        for subject in sorted(set(grouped) | set(scored))
     }
 
     return SloReport(
@@ -523,7 +594,31 @@ def compute_slo(
         total_runs=len(rows),
         blind_spots=_blind_spots(subjects, min_events),
         cost_reference_usd=cfg["cost_reference"],
+        unattributed_scores=unattributed_scores,
+        total_scores=len(score_rows),
     )
+
+
+def _group_by_subject(
+    rows: list[Mapping[str, Any]],
+    identity_field: str,
+) -> tuple[dict[str, list[Mapping[str, Any]]], int]:
+    """Bucket rows by their identity field, and count the ones that have none.
+
+    One function for runs and for scores, because the rule they are held to is
+    one rule: a row with no subject is COUNTED and appears in nobody's
+    numbers. Two copies of it would eventually be one copy and one drift, and
+    the drift would look like a fleet quietly improving.
+    """
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    unattributed = 0
+    for row in rows:
+        subject = str(row.get(identity_field) or "")
+        if not subject:
+            unattributed += 1
+            continue
+        grouped.setdefault(subject, []).append(row)
+    return grouped, unattributed
 
 
 def _blind_spots(subjects: Mapping[str, list[SloMeasurement]], min_events: int) -> list[str]:

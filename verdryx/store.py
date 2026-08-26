@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     id            TEXT PRIMARY KEY,
     model         TEXT NOT NULL,
     started_at    TEXT NOT NULL,
-    finished_at   TEXT
+    finished_at   TEXT,
+    agent_id      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS scores (
@@ -59,7 +60,65 @@ def _parse_iso(s: str) -> datetime:
 #: Schema version stamped into `PRAGMA user_version`. Bump this only
 #: together with a real change to `_DDL` that an older reader would
 #: misinterpret.
+#:
+#: It did NOT move when `eval_runs.agent_id` arrived on 2026-08-26, and the
+#: rule above is the reason rather than an exception to it. Nothing in this
+#: module selects `*`: every read names its columns, so a build that predates
+#: the column reads exactly the values it always read and cannot misinterpret
+#: one it never asks for. Bumping would have made every such build refuse a
+#: store the moment a single new run was written into it, and the Genaryx
+#: console opens this file directly.
+#:
+#: The residual hazard is real and is named rather than hidden: an OLDER build
+#: re-saving a run would erase its subject, because `save_run` is
+#: `INSERT OR REPLACE` over a column it does not know about. It stays a
+#: hazard and not a defect because nothing re-saves a run: `cli.run_eval`
+#: mints `uuid.uuid4()` per run, so the only writer never presents an id that
+#: already exists. If a rewrite path is ever added, that is the change that
+#: earns the version bump, not this one.
 SCHEMA_VERSION = 1
+
+#: Columns added to `eval_runs` after the table first shipped, in the order
+#: they arrived, as `(name, type)`. `CREATE TABLE IF NOT EXISTS` is still the
+#: whole migration story for a table, and it says nothing at all about a table
+#: that already exists: an older store reaches this build one column short and
+#: every read of the new name is an OperationalError on a file that was
+#: perfectly good yesterday. So each entry here is applied with `ALTER TABLE`
+#: when, and only when, the column is missing.
+#:
+#: Every column here must be nullable with no default. That is what makes a
+#: row written before it read back as "no subject" rather than as a fabricated
+#: one: SQLite fills existing rows with NULL, and NULL is the honest answer for
+#: a run whose subject nobody recorded. A `DEFAULT` here would invent an
+#: attribution for every historical run in one statement.
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (("agent_id", "TEXT"),)
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Widen `eval_runs` in place for a store written before a column existed.
+
+    `ALTER TABLE ... ADD COLUMN` rather than a rebuild, and the difference
+    matters more than the line count: rebuilding the table would drop and
+    recreate it, and `baselines.eval_run_id` and `scores.run_id` both
+    REFERENCE `eval_runs(id)`. With `PRAGMA foreign_keys=ON` (see
+    `_configure_connection`) that is either a refusal or, worse, an orphaning,
+    on a file whose only fault was being written last month.
+
+    Guarded by `PRAGMA table_info` rather than by a caught exception, because
+    "the column is already there" and "the ALTER failed for some other reason"
+    are different facts and `sqlite3.OperationalError` reports them the same
+    way.
+    """
+    present = {row[1] for row in conn.execute("PRAGMA table_info(eval_runs)")}
+    if not present:
+        # No such table yet, so `_DDL` is about to create it complete. Nothing
+        # to widen, and an ALTER here would fail rather than measure nothing.
+        return
+    for name, sql_type in _ADDED_COLUMNS:
+        if name not in present:
+            # Not parameterisable: DDL does not take bound values. Both halves
+            # are this module's own constants, never caller input.
+            conn.execute(f"ALTER TABLE eval_runs ADD COLUMN {name} {sql_type}")
 
 
 def migrate(conn: sqlite3.Connection) -> None:
@@ -78,7 +137,13 @@ def migrate(conn: sqlite3.Connection) -> None:
     reader that meets a shape it does not know should say so rather than
     quietly return wrong rows, which is why a store stamped NEWER than this
     build understands is refused outright rather than opened.
+
+    `_add_missing_columns` runs first, and the order is not arbitrary: it has
+    to see the table as the older build left it, before `_DDL` has had a
+    chance to be a no-op over it. On a fresh file it finds no table and does
+    nothing, and `_DDL` then creates the complete shape in one statement.
     """
+    _add_missing_columns(conn)
     conn.executescript(_DDL)
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     if current > SCHEMA_VERSION:
@@ -145,15 +210,24 @@ class Store:
     # ------------------------------------------------------------------
 
     def save_run(self, run: EvalRun) -> None:
-        """Insert or replace an eval run and all of its scores."""
+        """Insert or replace an eval run and all of its scores.
+
+        `agent_id` is written as NULL when the run carries no subject, and
+        `""` is normalised to the same NULL on the way in. One spelling of
+        absence, deliberately: two of them in one column is how a later
+        `WHERE agent_id IS NULL` silently misses half the rows it was written
+        for. The consequence is visible and is tested: a run saved with
+        `agent_id=""` loads back as `agent_id=None`.
+        """
         self._conn.execute(
-            "INSERT OR REPLACE INTO eval_runs (id, model, started_at, finished_at) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO eval_runs (id, model, started_at, finished_at, agent_id) "
+            "VALUES (?, ?, ?, ?, ?)",
             (
                 run.id,
                 run.model,
                 _iso(run.started_at),
                 _iso(run.finished_at) if run.finished_at else None,
+                run.agent_id or None,
             ),
         )
         self._conn.execute("DELETE FROM scores WHERE run_id = ?", (run.id,))
@@ -166,7 +240,7 @@ class Store:
     def load_run(self, run_id: str) -> EvalRun | None:
         """Fetch a single eval run by id, with its scores, or None."""
         row: Any = self._conn.execute(
-            "SELECT id, model, started_at, finished_at FROM eval_runs WHERE id = ?",
+            "SELECT id, model, started_at, finished_at, agent_id FROM eval_runs WHERE id = ?",
             (run_id,),
         ).fetchone()
         if row is None:
@@ -180,7 +254,7 @@ class Store:
             model: If set, restrict to runs of this model.
             limit: If set, return at most this many runs.
         """
-        sql = "SELECT id, model, started_at, finished_at FROM eval_runs"
+        sql = "SELECT id, model, started_at, finished_at, agent_id FROM eval_runs"
         params: tuple[Any, ...] = ()
         if model is not None:
             sql += " WHERE model = ?"
@@ -209,7 +283,60 @@ class Store:
             started_at=_parse_iso(row["started_at"]),
             finished_at=_parse_iso(row["finished_at"]) if row["finished_at"] else None,
             scores=scores,
+            # NULL stays None. A row written before the column existed cannot
+            # know whose run it was, and anything filled in here (the model
+            # name, a default agent, the first subject the store holds) would
+            # attribute somebody's runs to an agent that never made them.
+            agent_id=row["agent_id"],
         )
+
+    def score_records(self) -> list[dict[str, Any]]:
+        """Every stored score, under the subject of the run that produced it.
+
+        Shaped for `slo.compute_slo(scores=...)`, which is the only consumer,
+        and the shape is a documented coupling rather than an accident: it is
+        one SQL join, and doing it in the CLI would mean hydrating every run
+        object to throw all of it away but two fields.
+
+        **One record per CASE, not per run**, and that is the load-bearing
+        choice here. A case is one thing a person asked the agent to do, which
+        is the unit `slo` counts, the same way a tokenfuse run is one task
+        rather than one call. Thresholding a run's `mean_score` instead would
+        hide exactly the distribution the floor exists to price: `slo`'s own
+        module docstring makes the argument, that a fleet scoring 0.9 every
+        time and a fleet alternating 1.0 and 0.8 have the same mean and very
+        different reliability, and only one of them embarrasses somebody.
+
+        The subject is `""` when the run carries none, never absent and never
+        guessed, because that is the value `slo.compute_slo` counts as
+        unattributed and puts in nobody's numbers.
+
+        `last_ts_millis` is the run's finish time, falling back to its start
+        for a run that never finished. It is here so the quality burn rate can
+        be measured at all: without a timestamp `slo._recent_burn` returns an
+        honest zero, the report calls the window blind, and the indicator can
+        compute a ratio it can never warn about. Note this is the EVAL clock,
+        not the gateway's, so a report that mixes trace scores and stored ones
+        is asking two sources what "recently" means. Both are wall-clock UTC
+        milliseconds, which is what makes that answerable at all.
+        """
+        rows: list[Any] = self._conn.execute(
+            "SELECT r.agent_id AS agent_id, s.value AS value, "
+            "       r.finished_at AS finished_at, r.started_at AS started_at "
+            "FROM scores s JOIN eval_runs r ON s.run_id = r.id "
+            "ORDER BY r.started_at, s.id"
+        ).fetchall()
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            when = _parse_iso(row["finished_at"] or row["started_at"])
+            records.append(
+                {
+                    "agent_id": row["agent_id"] or "",
+                    "score": row["value"],
+                    "last_ts_millis": int(when.timestamp() * 1000),
+                }
+            )
+        return records
 
     # ------------------------------------------------------------------
     # Baselines
