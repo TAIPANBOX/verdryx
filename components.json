@@ -1,0 +1,84 @@
+{
+  "$comment": [
+    "What this repository contributes to a running stack, and what a check may",
+    "believe about it. `checked` is proved against this repository by",
+    "tests/test_manifest.py in this repository's own CI; `declared` is a statement",
+    "nobody can verify and carries its own `why`.",
+    "",
+    "IN PYTHON THE THING TO CHECK IS `[project.scripts]`, AND THAT IS NOT AN",
+    "ANALOGY. Go's manifests ask `go list` which main packages exist and Rust's",
+    "ask `cargo metadata` which binaries a workspace builds. Here the packaging",
+    "metadata IS the answer, and it is already a cross-repository contract:",
+    "stack-k8s's console.Dockerfile installs the Python tools by reading",
+    "`pyproject [project.scripts]`, and says so in a comment. So a script added",
+    "here without a manifest entry is a component the console image would install",
+    "and nothing would have declared.",
+    "",
+    "TWO COMPONENTS, ONE SCRIPT. estate.json says this repository runs `verdryx`",
+    "and `verdryx-drift`. There is one console script and six subcommands:",
+    "`verdryx-drift` is the ROUTINE name for `verdryx drift`, the same shape as",
+    "idryx-detect and qryx-trend.",
+    "",
+    "THE EXIT CODE FOR A MISSING ARGUMENT IS argparse's 2, AND IT IS DECLARED",
+    "BECAUSE A ROUTINE READS IT. stack-up's routine treats a non-zero exit as an",
+    "error to show an operator, so the difference between `you did not give me a",
+    "baseline` and `the drift check failed` is a cross-repository fact and not an",
+    "implementation detail. mockryx and qryx one repository over use 1 and 2 to",
+    "mean different things again; nothing makes these three agree, and this file",
+    "at least makes each one say which it is."
+  ],
+  "schema": "taipanbox.dev/components/v1",
+  "repo": "TAIPANBOX/verdryx",
+  "components": [
+    {
+      "name": "verdryx",
+      "class": "tool",
+      "checked": {
+        "console_script": "verdryx",
+        "entry_point": "verdryx.cli:main",
+        "subcommands": [
+          "eval",
+          "baseline",
+          "drift",
+          "cost-per-correct",
+          "slo",
+          "version"
+        ],
+        "env": {
+          "VERDRYX_DB": {
+            "required": false
+          },
+          "VERDRYX_EVENTS_PATH": {
+            "required": false
+          },
+          "VERDRYX_OTLP_ENDPOINT": {
+            "required": false
+          }
+        },
+        "missing_argument_exit_code": 2
+      },
+      "declared": {
+        "the_console_image_installs_it_by_reading_pyproject": {
+          "value": "[project.scripts]",
+          "why": "stack-k8s's console.Dockerfile copies this repository in and installs the script its packaging metadata names. stack-up does the same into its own venv. Neither reads this file, which is why the check below compares the manifest against pyproject rather than against either of them."
+        }
+      }
+    },
+    {
+      "name": "verdryx-drift",
+      "class": "tool",
+      "checked": {
+        "console_script": "verdryx",
+        "entry_point": "verdryx.cli:main",
+        "subcommand": "drift",
+        "missing_argument_exit_code": 2
+      },
+      "declared": {
+        "it_is_the_scheduled_half": {
+          "value": "verdryx drift --baseline <id>",
+          "why": "stack-up runs it as a routine and stack-k8s as the quality-drift CronJob. The name in estate.json's `runs` is the routine's, not a script's, which is why it maps to a subcommand here."
+        }
+      }
+    }
+  ]
+}
