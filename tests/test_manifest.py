@@ -53,7 +53,9 @@ def test_every_console_script_this_package_installs_is_declared_and_the_reverse(
     scripts = pyproject()["project"].get("scripts") or {}
     assert scripts, "pyproject declares no console script, so this measured nothing"
 
-    declared = {c["checked"]["console_script"] for c in components() if "console_script" in c["checked"]}
+    declared = {
+        c["checked"]["console_script"] for c in components() if "console_script" in c["checked"]
+    }
     assert declared, "no component declares a console script, so this measured nothing"
 
     for name in scripts:
@@ -169,4 +171,6 @@ def test_a_missing_required_argument_exits_with_the_declared_code():
             f"`verdryx {sub}` refused without saying what was required:\n{got.stderr}"
         )
     if not checked:
-        pytest.fail("no component declares both a subcommand and an exit code, so this measured nothing")
+        pytest.fail(
+            "no component declares both a subcommand and an exit code, so this measured nothing"
+        )
