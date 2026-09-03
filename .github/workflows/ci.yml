@@ -56,6 +56,12 @@ jobs:
       - name: the README's numbers are true
         run: ./scripts/readme-numbers.sh
 
+      # A Gherkin scenario with no bound test is a paragraph that proves
+      # nothing about the code. Checked in both directions: an unbound
+      # scenario, and a binding that names a test which no longer exists.
+      - name: every scenario is bound to a test that exists
+        run: ./scripts/features-are-bound.sh
+
       # Last, because it mutates tracked files and restores them. It needs a
       # clean tree and says so plainly, so it also reports any earlier step
       # that starts writing into the checkout.
