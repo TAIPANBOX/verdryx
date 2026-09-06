@@ -50,6 +50,7 @@ pytest
 ./scripts/readme-numbers.sh
 ./scripts/features-are-bound.sh
 ./scripts/gates-have-teeth.sh   # invariant 7; needs a clean tree and the package installed
+pip-audit --skip-editable       # CI only; no ignored advisories, needs pip-audit installed
 ```
 
 `readme-numbers.sh` was missing from this list until 2026-08-09 while CI ran
