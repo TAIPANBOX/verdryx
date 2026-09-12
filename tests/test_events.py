@@ -21,6 +21,7 @@ import pytest
 from verdryx.events import (
     AGENT_ID_MAX_LENGTH,
     AGENT_ID_PATTERN,
+    SCHEMA,
     EventLog,
     canonicalize,
     chain_hash,
@@ -534,3 +535,86 @@ def test_an_over_long_agent_id_is_nonconforming_even_though_it_matches(tmp_path)
     log = EventLog(tmp_path / "events.ndjson")
     log.emit("eval_run", long_id, {"a": 1})
     assert log.nonconforming_agent_id == 1
+
+
+# ------------------------------------------------------------------
+# The 1.0 event contract (agent-passport SPEC.md Sec 6.4.1)
+# ------------------------------------------------------------------
+
+
+def test_a_v1_0_stamped_event_this_emitter_writes_validates_under_the_vendored_v1_0_contract(
+    tmp_path, event_schema, event_schema_v1_0, agent_id
+) -> None:
+    """SPEC 6.4.1 says a consumer must accept v1.0 and a producer keeps
+    emitting the version it emits today, moving to v1.0 in its own release.
+    This proves verdryx's lines are already v1.0-shaped, so that move will be
+    a one-constant change here, not a rewrite of what EventLog.emit builds;
+    and it pins that the constant has NOT moved yet in this change.
+    """
+    events_path = tmp_path / "events.ndjson"
+    log = EventLog(events_path)
+    log.emit(
+        "eval_run",
+        agent_id,
+        {"model": "stub", "cases": 5, "mean_score": 0.9, "total_tokens": 0, "total_cost_usd": 0.0},
+        run_id="run-1",
+    )
+    events = _read_ndjson(events_path)
+    assert len(events) == 1
+    event = events[0]
+
+    # Unchanged behaviour: verdryx still emits v0.2 today, and it still
+    # validates under the v0.2 contract.
+    jsonschema.validate(instance=event, schema=event_schema)
+    assert SCHEMA == "taipanbox.dev/agent-event/v0.2"
+
+    # The line verdryx writes today is already v1.0-shaped: stamping the
+    # version string is the only edit needed to validate under v1.0.
+    v1_0_event = dict(event)
+    v1_0_event["schema"] = "taipanbox.dev/agent-event/v1.0"
+    jsonschema.validate(instance=v1_0_event, schema=event_schema_v1_0)
+
+
+def test_the_vendored_v1_0_contract_widens_only_the_subject(
+    event_schema, event_schema_v1_0
+) -> None:
+    """The one widening from v0.2 to v1.0 is the `claimed:` subject (SPEC 3.3).
+    Verdryx never writes one: EventLog.emit always writes the Passport id the
+    caller evaluated under, never a claim. A consumer that has not modelled
+    claims is right to refuse a claimed subject, and SPEC 6.4.1 counts that as
+    a processing failure rather than silent acceptance.
+    """
+    agent_id = event_schema_v1_0["properties"]["agent_id"]
+    assert "/v1.0/" in event_schema_v1_0["$id"]
+    assert event_schema_v1_0["properties"]["schema"]["const"] == "taipanbox.dev/agent-event/v1.0"
+    assert agent_id["pattern"] == "^(claimed:)?agent://[a-z0-9.-]+/[a-z0-9._/-]+$"
+    assert agent_id["maxLength"] == 263
+
+    def other_properties(schema: dict[str, Any]) -> dict[str, Any]:
+        others = dict(schema["properties"])
+        del others["agent_id"]
+        del others["schema"]
+        return others
+
+    assert other_properties(event_schema_v1_0) == other_properties(event_schema)
+    assert event_schema_v1_0["required"] == event_schema["required"]
+
+    def minimal_envelope(schema_version: str, subject: str) -> dict[str, Any]:
+        return {
+            "schema": schema_version,
+            "ts": "2026-09-12T00:00:00.000Z",
+            "source": "verdryx",
+            "type": "eval_run",
+            "agent_id": subject,
+        }
+
+    claimed = "claimed:agent://acme-bank.example/support/tier1-bot"
+    jsonschema.validate(
+        instance=minimal_envelope("taipanbox.dev/agent-event/v1.0", claimed),
+        schema=event_schema_v1_0,
+    )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(
+            instance=minimal_envelope("taipanbox.dev/agent-event/v0.2", claimed),
+            schema=event_schema,
+        )
