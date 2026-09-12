@@ -29,6 +29,7 @@
   ],
   "schema": "taipanbox.dev/components/v1",
   "repo": "TAIPANBOX/verdryx",
+  "distribution": "not published: installed from the repository with pip (git+https); no PyPI package yet",
   "components": [
     {
       "name": "verdryx",
