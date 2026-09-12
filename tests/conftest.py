@@ -15,6 +15,7 @@ from verdryx.models import EvalCase, EvalSet, GraderKind
 AGENT_ID = "agent://acme-bank.example/support/tier1-bot"
 
 _SCHEMA_PATH = Path(__file__).parent / "fixtures" / "agent-event.v0.2.schema.json"
+_SCHEMA_PATH_V1_0 = Path(__file__).parent / "fixtures" / "agent-event.v1.0.schema.json"
 
 
 @pytest.fixture()
@@ -26,6 +27,12 @@ def agent_id() -> str:
 def event_schema() -> dict[str, Any]:
     """The vendored Agent Passport agent-event v0.2 JSON Schema."""
     return json.loads(_SCHEMA_PATH.read_text())
+
+
+@pytest.fixture()
+def event_schema_v1_0() -> dict[str, Any]:
+    """The vendored Agent Passport agent-event v1.0 JSON Schema."""
+    return json.loads(_SCHEMA_PATH_V1_0.read_text())
 
 
 @pytest.fixture()
