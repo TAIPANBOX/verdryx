@@ -235,6 +235,41 @@ assert m, "no test badge in README.md"
 open("README.md","w").write(s.replace(m.group(0), "badge/tests-%d-" % (int(m.group(1))+7), 1))')" \
 	"badge"
 
+# --- the lock actually resolves what pyproject.toml declares ----------------
+#
+# Two faults: a pinned version older than its own floor, and a dependency
+# pyproject.toml names that the lock never pins at all. Both look identical
+# to a reader of pyproject.toml alone, which only ever shows the aspiration.
+
+run_case "lock-satisfies-pyproject: a pin older than its own floor" fail \
+	'./scripts/lock-satisfies-pyproject.sh' \
+	"$(py 'edit("requirements-dev.lock", "rfc8785==0.1.4", "rfc8785==0.1.3")')" \
+	"older than pyproject.toml's floor"
+
+run_case "lock-satisfies-pyproject: a dependency the lock never pins" fail \
+	'./scripts/lock-satisfies-pyproject.sh' \
+	"$(py 'edit("requirements-dev.lock", "pytest==9.1.1\n", "")')" \
+	"does not pin it"
+
+# A dependency with no `>=` floor at all used to be invisible to `wanted`,
+# built only from floor-bearing entries: it never resolved to anything, so a
+# bare name added to pyproject.toml and never pinned in the lock passed
+# silently. `wanted` now carries every declared name, floor `None` where
+# there is none, and presence is checked for all of them.
+run_case "lock-satisfies-pyproject: a bare (no-floor) dependency missing from the lock" fail \
+	'./scripts/lock-satisfies-pyproject.sh' \
+	"$(py 'edit("pyproject.toml", "\"jsonschema>=4.20\",", "\"jsonschema>=4.20\",\n    \"bare-unpinned-dep\",")')" \
+	"does not pin it"
+
+# A hand-rolled version compare read only the leading digits of each
+# dot-separated chunk, so `8.0rc1` and `8.0` compared equal: PEP 440 says
+# `8.0rc1 < 8.0`, a pre-release is strictly older than the release it leads
+# up to. `packaging.version.Version` gets the ordering right.
+run_case "lock-satisfies-pyproject: a pre-release pin reads as satisfying its floor" fail \
+	'./scripts/lock-satisfies-pyproject.sh' \
+	"$(py 'edit("requirements-dev.lock", "pytest==9.1.1", "pytest==8.0rc1")')" \
+	"older than pyproject.toml's floor"
+
 echo
 echo "=== and what they must NOT catch ==="
 
@@ -270,6 +305,11 @@ run_case "features-are-bound: the subject taken away entirely" fail \
 	'./scripts/features-are-bound.sh' \
 	"$(py 'import shutil; shutil.rmtree("features")')" \
 	"not a pass"
+
+run_case "lock-satisfies-pyproject: the lock file taken away entirely" fail \
+	'./scripts/lock-satisfies-pyproject.sh' \
+	"$(py 'import pathlib; pathlib.Path("requirements-dev.lock").unlink()')" \
+	"measured nothing"
 
 echo
 if [ -n "$(git status --porcelain)" ]; then

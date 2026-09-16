@@ -14,6 +14,13 @@
 
 </div>
 
+Line coverage of the `verdryx` package: **97%** (`1359/1405` statements).
+`@measured .venv/bin/pytest --cov=verdryx --cov-report=term-missing 2026-09-16`.
+Unlike the tests badge above, this figure is not gated (see CLAUDE.md invariant
+11): recomputing it inside a gate would mean running the full suite inside a
+gate, which is what the other gates already run once per CI job, so it is
+restated by hand at the point it is measured instead.
+
 **Verdryx measures whether an operator's own agents did their job correctly.
 It never manipulates outputs, never crafts adversarial prompts, and never
 attacks anything.** Given an eval set, it grades a model's outputs against
@@ -623,12 +630,17 @@ with Store.open("verdryx.db") as store:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev,traces]'
+pip install -r requirements-dev.lock
+pip install -e . --no-deps
 
 pytest              # run the test suite
 ruff check .        # lint
 ruff format .       # format
 ```
+
+`requirements-dev.lock` is the pinned resolution CI installs from (CLAUDE.md
+invariant 10); installing from it instead of a fresh `.[dev,traces]` resolve
+is what makes "it works on my machine" mean the same versions everywhere.
 
 All eval/judge network calls are behind the injected `LLMAdapter` protocol,
 so the test suite runs fully offline against `StubLLMAdapter`. The `traces`
