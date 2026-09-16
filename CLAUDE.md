@@ -99,9 +99,11 @@ an absent invariant.
    selected by the caller, and the default configuration must be the
    deterministic graders. *(gate: `scripts/no-paid-by-default.sh`)*
 
-6. **A number this README states about the repository is checked against the
-   repository.** A figure on a page has no owner and no clock: it is right the
-   day it is written, and the suite grows in commits that never open the README.
+6. **The test count this README states about the repository is checked
+   against the repository.** The coverage figure the README also states is
+   the exception, and invariant 11 says so and why. A figure on a page has no
+   owner and no clock: it is right the day it is written, and the suite
+   grows in commits that never open the README.
    This repository was one of four caught by that on 2026-08-05, when the seven
    figures on it-rat.com were audited against the code they describe: the page
    said **217 tests where pytest collects 292**. It was not wrong when written.
@@ -125,10 +127,11 @@ an absent invariant.
    A text parser does not break loudly: it stops matching and reports success.
    The mutants that proved these gates lived in commit messages and in the
    `*(gate: ...)*` markers above, which is a record of what was true once.
-   *(gate: `scripts/gates-have-teeth.sh`, 14 cases: eight real faults each gate
-   must catch, three non-faults they must not, and three subjects taken away
-   entirely. It read "10 cases" until 2026-08-26, having been written once
-   while the cases kept arriving, which is invariant 6's own failure inside
+   *(gate: `scripts/gates-have-teeth.sh`, 19 cases: thirteen real faults each
+   gate must catch, two non-faults they must not, and four subjects taken away
+   entirely. It read "10 cases" until 2026-08-26 and "14 cases" until the lock
+   gate's own teeth arrived, having been written once while the cases kept
+   arriving each time, which is invariant 6's own failure inside
    the file that records invariant 6. Counted by running it. The non-fault cases are the ones worth keeping: an optional
    dependency imported INSIDE a function is exactly what invariant 2 allows,
    and a gate that fired on it would be deleted by whoever is unblocking CI.)*

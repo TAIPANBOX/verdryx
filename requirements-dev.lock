@@ -6,11 +6,20 @@
 # so "it works on my machine" means the same versions everywhere instead of
 # whatever floor-satisfying set pip happens to pick that day.
 #
+# This lock is complete for the interpreter CI actually runs, Python 3.11
+# (`.github/workflows/ci.yml`). A resolution taken on a different interpreter
+# can omit a conditional dependency 3.11 needs: `referencing==0.37.0` requires
+# `typing-extensions>=4.4.0; python_version<"3.13"`, invisible to `pip freeze`
+# on any interpreter that clause excludes, so it is pinned by hand below.
+#
 # Generated with:
 #   .venv/bin/pip install -e '.[dev,traces]'
 #   .venv/bin/pip freeze
 # then the editable `verdryx` line removed (that one is installed separately,
-# with `-e . --no-deps`, from the checkout being built).
+# with `-e . --no-deps`, from the checkout being built), and every other line
+# `pip freeze` wrote for a tool that is not part of the dev/test install
+# (`pip-audit`'s own dependency tree) removed by hand, since that command
+# only ran here to audit the venv, not because the dev/test path needs it.
 #
 # The `anthropic` extra is deliberately NOT in this lock: CI never installs
 # it (`pip install -e .[dev,traces]`, no `anthropic`), and nothing in the
@@ -20,7 +29,8 @@
 # Regenerate the same way after changing a floor in pyproject.toml:
 #   python3 -m venv /tmp/verdryx-lock && /tmp/verdryx-lock/bin/pip install -e '.[dev,traces]'
 #   /tmp/verdryx-lock/bin/pip freeze | grep -v '^-e ' > requirements-dev.lock
-# then restore this header comment (`pip freeze` does not write one).
+# then restore this header comment and re-filter to the dev/test set
+# (`pip freeze` does neither).
 attrs==26.1.0
 coverage==7.16.1
 iniconfig==2.3.0
@@ -36,3 +46,7 @@ referencing==0.37.0
 rfc8785==0.1.4
 rpds-py==2026.6.3
 ruff==0.16.7
+# referencing's own conditional dependency, `typing-extensions>=4.4.0;
+# python_version<"3.13"`: needed on CI's 3.11, invisible to a `pip freeze`
+# taken on this lock's 3.14 interpreter, pinned here by hand instead.
+typing-extensions==4.16.0

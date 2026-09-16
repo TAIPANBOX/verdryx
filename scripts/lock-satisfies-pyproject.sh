@@ -32,33 +32,37 @@ import re
 import sys
 import tomllib
 
+try:
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+except ImportError:
+    print("FAIL: the 'packaging' package is not importable, so this check measured nothing")
+    sys.exit(1)
+
 LOCKED_GROUPS = ["dev", "traces"]  # must match what CI installs: .[dev,traces]
 LOCK_PATH = pathlib.Path("requirements-dev.lock")
 PYPROJECT_PATH = pathlib.Path("pyproject.toml")
 
 
 def parse_requirement(req: str) -> tuple[str, str | None]:
-    """Return (package name, floor version or None) from a PEP 508-ish string."""
-    name = req.split("[")[0].split(">")[0].split("<")[0].split("=")[0].split("~")[0].strip()
-    m = re.search(r">=\s*([0-9][0-9A-Za-z.\-]*)", req)
-    floor = m.group(1) if m else None
-    return name, floor
+    """Return (package name, floor version or None), via a real PEP 508 parse.
 
-
-def version_tuple(v: str) -> tuple[int, ...]:
-    parts = []
-    for chunk in v.split("."):
-        digits = re.match(r"\d+", chunk)
-        parts.append(int(digits.group(0)) if digits else 0)
-    return tuple(parts)
+    A hand-rolled split on `>`, `<`, `=`, `~` mis-parses a name carrying one of
+    those characters (`foo!=1.0,>=0.5` reads as the name `foo!`) and a version
+    compare built the same way is blind to PEP 440 ordering: it drops anything
+    after the leading digits of a chunk, so `8.0rc1` and `8.0` compare equal.
+    `Requirement` and `Version` get both right.
+    """
+    requirement = Requirement(req)
+    floor = None
+    for spec in requirement.specifier:
+        if spec.operator == ">=":
+            floor = spec.version
+    return requirement.name, floor
 
 
 def version_at_least(actual: str, floor: str) -> bool:
-    a, f = version_tuple(actual), version_tuple(floor)
-    width = max(len(a), len(f))
-    a = a + (0,) * (width - len(a))
-    f = f + (0,) * (width - len(f))
-    return a >= f
+    return Version(actual) >= Version(floor)
 
 
 if not PYPROJECT_PATH.exists():
@@ -79,19 +83,17 @@ if missing_groups:
           f"so this check measured nothing for them")
     sys.exit(1)
 
-wanted: dict[str, str] = {}
+wanted: dict[str, str | None] = {}
 for req in base_deps:
     name, floor = parse_requirement(req)
-    if floor is not None:
-        wanted[name] = floor
+    wanted[name] = floor
 for group in LOCKED_GROUPS:
     for req in optional.get(group, []):
         name, floor = parse_requirement(req)
-        if floor is not None:
-            wanted[name] = floor
+        wanted[name] = floor
 
 if not wanted:
-    print("FAIL: no floor-bearing dependency found across dependencies/"
+    print("FAIL: no dependency found across dependencies/"
           f"{LOCKED_GROUPS}, so this check measured nothing")
     sys.exit(1)
 
@@ -120,7 +122,7 @@ for name, floor in sorted(wanted.items()):
         print(f"FAIL: '{name}' is declared in pyproject.toml but {LOCK_PATH} does not pin it")
         problems = True
         continue
-    if not version_at_least(locked_version, floor):
+    if floor is not None and not version_at_least(locked_version, floor):
         print(f"FAIL: {LOCK_PATH} pins '{name}' at {locked_version}, "
               f"which is older than pyproject.toml's floor of {floor}")
         problems = True
@@ -131,6 +133,6 @@ if problems:
     print("comment) after changing a floor or adding a dependency.")
     sys.exit(1)
 
-print(f"OK: {len(wanted)} direct dependency floor(s) across dependencies/{LOCKED_GROUPS} "
-      f"all satisfied by {LOCK_PATH}.")
+print(f"OK: {len(wanted)} direct dependency name(s) across dependencies/{LOCKED_GROUPS}, "
+      f"all present in {LOCK_PATH} and every floor satisfied.")
 PY
