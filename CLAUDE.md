@@ -11,7 +11,9 @@ the code actually is, read `VALIDATION.md` and the README.
    quality plane: it reads TokenFuse's outcome-tagged Parquet traces and
    computes cost per outcome and quality drift.
 2. `pyproject.toml`. The dependency split there is an architectural decision,
-   not packaging trivia. See invariants 1 and 2.
+   not packaging trivia. See invariants 1 and 2. `requirements-dev.lock` is
+   the pinned resolution CI and an operator install from; see invariant 10
+   and the lock file's own header before changing either.
 3. `verdryx/events.py`, the canonicalization comment. It says why the RFC 8785
    implementation is delegated rather than written here.
 4. `SPEC.md` in the sibling repo `TAIPANBOX/agent-passport` for the event
@@ -49,6 +51,7 @@ pytest
 ./scripts/one-runtime-dependency.sh
 ./scripts/readme-numbers.sh
 ./scripts/features-are-bound.sh
+./scripts/lock-satisfies-pyproject.sh
 ./scripts/gates-have-teeth.sh   # invariant 7; needs a clean tree and the package installed
 pip-audit --skip-editable       # CI only; no ignored advisories, needs pip-audit installed
 ```
@@ -219,6 +222,29 @@ an absent invariant.
    *(not enforced; held by this file and by there being no policy-writing code
    to find)*
 
+10. **The install path CI and an operator use resolves to exact versions, not
+    whatever the day's floor-satisfying set happens to be.** `pyproject.toml`
+    keeps `>=` floors as the declared surface (invariant 1);
+    `requirements-dev.lock` is the pinned resolution of the dev/test
+    environment (`pip install -e '.[dev,traces]'`) that CI and a developer
+    actually install from. A floor moving in `pyproject.toml` with nobody
+    regenerating the lock, or a dependency added to `pyproject.toml` with
+    nobody regenerating the lock, both look identical from `pyproject.toml`
+    alone, which only ever shows the aspiration.
+    *(gate: `scripts/lock-satisfies-pyproject.sh`)*
+
+11. **Line coverage of the `verdryx` package is measured and reported on
+    every CI run and stated in the README, but it is not a merge gate.**
+    `pytest --cov=verdryx --cov-report=term-missing` in the `test` job prints
+    the total every run, and the README states the figure by hand at the
+    point it was measured. It is not recomputed by a script the way the test
+    count is (invariant 6): doing that would mean running the full suite a
+    second time inside a gate, which buys nothing the `pytest` step above it
+    did not already run. Whether a coverage number should ever fail a build
+    is the user's decision, not made here.
+    *(partly gated: CI prints the number every run; the README figure is a
+    restated `@measured` snapshot, not cross-checked by a script)*
+
 ## Decisions that have no gate yet
 
 This list is debt, and it is here to stay visible rather than to be tidy.
@@ -261,6 +287,14 @@ Verified by breaking three ways: a paid default on `--model`, a second
 judge unconditionally.
 
 Invariants 3 and 4 are judgement and probably stay judgement.
+
+Invariant 11's README coverage figure is held by this file alone, same as
+invariants 3 and 4: nothing cross-checks it against a fresh run the way
+`scripts/readme-numbers.sh` does for the test count. Wiring that up would mean
+a gate that reruns the full suite under coverage every time it is asked
+whether a number is stale, which is a real cost for a number with no pass/fail
+threshold riding on it. If a threshold is ever added (a user decision, not
+made here), gating the README figure against it becomes worth that cost.
 
 ## Standing rule
 

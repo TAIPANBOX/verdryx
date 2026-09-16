@@ -1,0 +1,38 @@
+# Pinned resolution for the dev/test/CI environment: `pip install -e '.[dev,traces]'`.
+#
+# pyproject.toml keeps `>=` floors as the declared surface (invariant 1: the
+# runtime core has exactly one dependency, and the two extras stay optional
+# extras). This file is the exact resolution CI and a developer install from,
+# so "it works on my machine" means the same versions everywhere instead of
+# whatever floor-satisfying set pip happens to pick that day.
+#
+# Generated with:
+#   .venv/bin/pip install -e '.[dev,traces]'
+#   .venv/bin/pip freeze
+# then the editable `verdryx` line removed (that one is installed separately,
+# with `-e . --no-deps`, from the checkout being built).
+#
+# The `anthropic` extra is deliberately NOT in this lock: CI never installs
+# it (`pip install -e .[dev,traces]`, no `anthropic`), and nothing in the
+# dev/test path imports it. Locking a group nothing installs would pin a
+# version nobody's install ever resolves, which is worse than not pinning it.
+#
+# Regenerate the same way after changing a floor in pyproject.toml:
+#   python3 -m venv /tmp/verdryx-lock && /tmp/verdryx-lock/bin/pip install -e '.[dev,traces]'
+#   /tmp/verdryx-lock/bin/pip freeze | grep -v '^-e ' > requirements-dev.lock
+# then restore this header comment (`pip freeze` does not write one).
+attrs==26.1.0
+coverage==7.16.1
+iniconfig==2.3.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+packaging==26.3
+pluggy==1.6.0
+pyarrow==25.0.1
+Pygments==2.21.0
+pytest==9.1.1
+pytest-cov==7.1.0
+referencing==0.37.0
+rfc8785==0.1.4
+rpds-py==2026.6.3
+ruff==0.16.7

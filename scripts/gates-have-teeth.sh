@@ -235,6 +235,22 @@ assert m, "no test badge in README.md"
 open("README.md","w").write(s.replace(m.group(0), "badge/tests-%d-" % (int(m.group(1))+7), 1))')" \
 	"badge"
 
+# --- the lock actually resolves what pyproject.toml declares ----------------
+#
+# Two faults: a pinned version older than its own floor, and a dependency
+# pyproject.toml names that the lock never pins at all. Both look identical
+# to a reader of pyproject.toml alone, which only ever shows the aspiration.
+
+run_case "lock-satisfies-pyproject: a pin older than its own floor" fail \
+	'./scripts/lock-satisfies-pyproject.sh' \
+	"$(py 'edit("requirements-dev.lock", "rfc8785==0.1.4", "rfc8785==0.1.3")')" \
+	"older than pyproject.toml's floor"
+
+run_case "lock-satisfies-pyproject: a dependency the lock never pins" fail \
+	'./scripts/lock-satisfies-pyproject.sh' \
+	"$(py 'edit("requirements-dev.lock", "pytest==9.1.1\n", "")')" \
+	"does not pin it"
+
 echo
 echo "=== and what they must NOT catch ==="
 
@@ -270,6 +286,11 @@ run_case "features-are-bound: the subject taken away entirely" fail \
 	'./scripts/features-are-bound.sh' \
 	"$(py 'import shutil; shutil.rmtree("features")')" \
 	"not a pass"
+
+run_case "lock-satisfies-pyproject: the lock file taken away entirely" fail \
+	'./scripts/lock-satisfies-pyproject.sh' \
+	"$(py 'import pathlib; pathlib.Path("requirements-dev.lock").unlink()')" \
+	"measured nothing"
 
 echo
 if [ -n "$(git status --porcelain)" ]; then

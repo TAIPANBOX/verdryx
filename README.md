@@ -14,6 +14,13 @@
 
 </div>
 
+Line coverage of the `verdryx` package: **97%** (`1359/1405` statements).
+`@measured .venv/bin/pytest --cov=verdryx --cov-report=term-missing 2026-09-16`.
+Unlike the tests badge above, this figure is not gated (see CLAUDE.md invariant
+10): recomputing it inside a gate would mean running the full suite inside a
+gate, which is what the other gates already run once per CI job, so it is
+restated by hand at the point it is measured instead.
+
 **Verdryx measures whether an operator's own agents did their job correctly.
 It never manipulates outputs, never crafts adversarial prompts, and never
 attacks anything.** Given an eval set, it grades a model's outputs against

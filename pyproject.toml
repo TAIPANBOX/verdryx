@@ -28,6 +28,7 @@ anthropic = ["anthropic>=0.40.0"]
 traces = ["pyarrow>=14.0"]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
     "ruff>=0.6",
     "jsonschema>=4.20",
 ]
@@ -59,3 +60,11 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+
+[tool.coverage.run]
+source = ["verdryx"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
