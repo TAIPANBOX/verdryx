@@ -83,6 +83,24 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
+# The Python that runs verdryx: $PYTHON if set, else this checkout's own
+# .venv, else python3. Checked here, before anything is built or started,
+# because a python3 without verdryx's one runtime dependency would otherwise
+# fail only after typryx was built and servers were already up.
+if [ -z "${PYTHON:-}" ]; then
+	if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+		PYTHON="$REPO_ROOT/.venv/bin/python"
+	else
+		PYTHON="python3"
+	fi
+fi
+if ! "$PYTHON" -c 'import rfc8785, verdryx' >/dev/null 2>&1; then
+	echo "bakeoff.sh: $PYTHON cannot import verdryx. Create the venv first:" >&2
+	echo "  python3 -m venv .venv && .venv/bin/pip install -e '.[anthropic]'   (the anthropic extra is needed only for the claude judge)" >&2
+	echo "or point PYTHON at an interpreter that has it." >&2
+	exit 1
+fi
+
 if [ -z "$OUT" ]; then
 	OUT="$REPO_ROOT/examples/bakeoff/results/$(date -u +%Y%m%dT%H%M%SZ)"
 fi
@@ -117,7 +135,7 @@ IFS="$OLDIFS"
 # Pure Python, no network either way (see run.py's require_claude_confirmation).
 # ------------------------------------------------------------------
 if [ "$WANT_CLAUDE" -eq 1 ]; then
-	if ! python3 -m examples.bakeoff.run claude-estimate --n "$N" --model "$CLAUDE_MODEL"; then
+	if ! "$PYTHON" -m examples.bakeoff.run claude-estimate --n "$N" --model "$CLAUDE_MODEL"; then
 		echo "bakeoff.sh: claude was requested without BAKEOFF_CONFIRM_SPEND=yes. Nothing else ran." >&2
 		exit 1
 	fi
@@ -168,7 +186,7 @@ if [ -n "$CASES_FILE" ]; then
 	RUN_DATASET_FLAGS=(--external-cases "$CASES_PATH")
 else
 	CASES_PATH="$OUT/cases.jsonl"
-	python3 -m examples.bakeoff.dataset --n "$N" --seed "$SEED" --out "$CASES_PATH"
+	"$PYTHON" -m examples.bakeoff.dataset --n "$N" --seed "$SEED" --out "$CASES_PATH"
 	N_EFFECTIVE="$N"
 	RUN_DATASET_FLAGS=(--n "$N" --seed "$SEED")
 fi
@@ -282,7 +300,7 @@ if [ "$WANT_JEV" -eq 1 ]; then
 		JEV_KEYFILE="$KEYDIR/jev.key"
 		printf '%s' "$JEV_BACKEND_KEY" >"$JEV_KEYFILE"
 		chmod 600 "$JEV_KEYFILE"
-		python3 -m examples.bakeoff.fake_jev --port "$FAKE_JEV_PORT" --key "$JEV_BACKEND_KEY" \
+		"$PYTHON" -m examples.bakeoff.fake_jev --port "$FAKE_JEV_PORT" --key "$JEV_BACKEND_KEY" \
 			>"$OUT/fake_jev.log" 2>&1 &
 		FAKE_JEV_PID=$!
 		PIDS+=("$FAKE_JEV_PID")
@@ -356,7 +374,7 @@ JUDGES_CONFIG="$OUT/judges.json"
 
 VERDRYX_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 
-python3 -m examples.bakeoff.run run \
+"$PYTHON" -m examples.bakeoff.run run \
 	--judges-config "$JUDGES_CONFIG" \
 	--cases "$CASES_PATH" \
 	--out "$OUT" \
