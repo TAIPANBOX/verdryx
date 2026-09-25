@@ -128,10 +128,11 @@ an absent invariant.
    A text parser does not break loudly: it stops matching and reports success.
    The mutants that proved these gates lived in commit messages and in the
    `*(gate: ...)*` markers above, which is a record of what was true once.
-   *(gate: `scripts/gates-have-teeth.sh`, 19 cases: thirteen real faults each
+   *(gate: `scripts/gates-have-teeth.sh`, 21 cases: fifteen real faults each
    gate must catch, two non-faults they must not, and four subjects taken away
-   entirely. It read "10 cases" until 2026-08-26 and "14 cases" until the lock
-   gate's own teeth arrived, having been written once while the cases kept
+   entirely. It read "10 cases" until 2026-08-26, "14 cases" until the lock
+   gate's own teeth arrived, and "19 cases" until the typryx grader's own two
+   arrived (2026-09-25), having been written once while the cases kept
    arriving each time, which is invariant 6's own failure inside
    the file that records invariant 6. Counted by running it. The non-fault cases are the ones worth keeping: an optional
    dependency imported INSIDE a function is exactly what invariant 2 allows,
