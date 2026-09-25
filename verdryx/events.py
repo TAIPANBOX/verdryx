@@ -45,11 +45,19 @@ Event types and severities (fixed mapping, per SPEC.md Sec 6.2 "verdryx" row)
 type                   severity  data
 =====================  ========  ==============================================
 eval_run               info      run_id, model, cases, mean_score, total_tokens,
-                                  total_cost_usd
+                                  total_cost_usd, unanswered
 quality_score          info      case_id, value, tokens, cost_usd
 quality_drift          high      baseline_id, window, mean_score, delta, verdict,
                                   baseline_n, t_statistic, ci_low, ci_high
 =====================  ========  ==============================================
+
+``unanswered`` (added 2026-09-25) is how many typed cases in the run came
+back unanswered from typryx and were counted apart rather than scored --
+see graders.TypedUnanswered and models.Unanswered. An addition to ``data``,
+not a change to a fixed shape: SPEC.md Sec 6.2 registers only the type name
+and severity for verdryx's ``eval_run`` row, no closed field list, and
+``data`` itself is ``additionalProperties: true`` in the vendored schema
+(``tests/fixtures/agent-event.v0.2.schema.json``).
 
 ``baseline_n``/``t_statistic``/``ci_low``/``ci_high`` come from
 :func:`verdryx.drift.compute_drift`'s optional two-sample significance

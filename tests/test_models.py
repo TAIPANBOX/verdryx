@@ -23,6 +23,7 @@ from verdryx.models import (
     GraderKind,
     OutcomeCost,
     Score,
+    Unanswered,
 )
 
 #: A minimal, provider-shape tool definition (Anthropic Messages API `tools`
@@ -355,6 +356,71 @@ def test_eval_run_mean_score_and_totals() -> None:
 def test_eval_run_finished_at_defaults_to_none() -> None:
     run = EvalRun(id="r1", model="stub", started_at=datetime.now(tz=UTC))
     assert run.finished_at is None
+
+
+# ------------------------------------------------------------------
+# Unanswered / EvalRun.unanswered / EvalRun.cases_asked
+#
+# @decided 2026-09-25: an unanswered typed case (verdryx#42) is counted
+# apart with its reason, gets no score, and is never a zero -- see
+# features/typed-grader.feature.
+# ------------------------------------------------------------------
+
+
+def test_unanswered_fields() -> None:
+    u = Unanswered(case_id="c1", answer_id="ans-1", reason="label_mass_too_low")
+    assert u.case_id == "c1"
+    assert u.answer_id == "ans-1"
+    assert u.reason == "label_mass_too_low"
+
+
+def test_eval_run_unanswered_defaults_to_empty() -> None:
+    run = EvalRun(id="r1", model="stub", started_at=datetime.now(tz=UTC))
+    assert run.unanswered == []
+
+
+def test_eval_run_cases_asked_counts_scored_and_unanswered() -> None:
+    run = EvalRun(
+        id="r1",
+        model="stub",
+        started_at=datetime.now(tz=UTC),
+        scores=[Score(case_id="a", value=1.0)],
+        unanswered=[Unanswered(case_id="b", answer_id="ans-1", reason="timeout")],
+    )
+    assert run.cases_asked == 2
+
+
+def test_eval_run_cases_asked_is_zero_for_a_fresh_run() -> None:
+    run = EvalRun(id="r1", model="stub", started_at=datetime.now(tz=UTC))
+    assert run.cases_asked == 0
+
+
+def test_eval_run_mean_score_is_over_scored_cases_only_when_some_are_unanswered() -> None:
+    """The whole point of Unanswered: it must never pull the mean toward
+    zero the way a fabricated Score(value=0.0) would."""
+    run = EvalRun(
+        id="r1",
+        model="stub",
+        started_at=datetime.now(tz=UTC),
+        scores=[Score(case_id="a", value=1.0), Score(case_id="b", value=0.0)],
+        unanswered=[Unanswered(case_id="c", answer_id="ans-2", reason="label_mass_too_low")],
+    )
+    assert run.mean_score == pytest.approx(0.5)
+    assert run.cases_asked == 3
+
+
+def test_eval_run_mean_score_is_unaffected_by_unanswered_when_no_case_scored() -> None:
+    """mean_score itself stays 0.0 by construction (sum of an empty list);
+    it is verdryx.cli._cmd_eval's printout that turns this into "unmeasured"
+    rather than "0.000" -- see test_cli.py."""
+    run = EvalRun(
+        id="r1",
+        model="stub",
+        started_at=datetime.now(tz=UTC),
+        unanswered=[Unanswered(case_id="a", answer_id="ans-1", reason="label_mass_too_low")],
+    )
+    assert run.mean_score == 0.0
+    assert run.cases_asked == 1
 
 
 # ------------------------------------------------------------------

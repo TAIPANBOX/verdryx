@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB.svg)
-![tests](https://img.shields.io/badge/tests-409-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-426-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/phase-1%20(mvp)-success.svg)
 
@@ -269,11 +269,30 @@ template's probability-weighted mean level normalised to `[0, 1]`; a
 `choice` template has no order and is refused rather than scored. When
 typryx answers `unanswered` (a timeout, a backend error, a model that
 returned no probabilities), that is never turned into a `0.0`, because
-CLAUDE.md invariant 8 says an unmeasured indicator is never a zero. The
-whole eval run fails instead, naming the case, typryx's `answer_id` and its
-reason. A refusal (its hourly cap, a bad key, an unknown template) or a
-typryx nobody could reach fails the run the same way, naming the HTTP
-status and typryx's code, never the key.
+CLAUDE.md invariant 8 says an unmeasured indicator is never a zero.
+`@decided 2026-09-25` (paraphrase): the case is counted apart instead, with
+typryx's own `answer_id` and reason, scores nothing, and the run completes
+and is saved with its mean taken over the answered cases only -- `verdryx
+eval`'s own printout shows `unanswered: N of M asked (reason: count, ...)`
+beside the mean, and `EvalRun.unanswered` carries the same rows in the
+store. A run where every case comes back unanswered has no mean at all:
+the printout reads `mean score: unmeasured (0 of M answered)` rather than
+`0.000`, and `verdryx baseline` refuses to snapshot it (a baseline of an
+unmeasured mean would be a fabricated number).
+
+This replaced an earlier behaviour, kept here because the reason is worth
+knowing: before 2026-09-25, one unanswered case failed the WHOLE run, and
+any outcomes already posted to typryx for earlier cases in that run stayed
+in its ledger while the run itself was thrown away (verdryx#42). Measured
+against a real backend the same day (a local Ollama `qwen2.5:7b`), 3 of 60
+asks come back unanswered every time, so a 60-case run against it could
+never complete under the old behaviour.
+
+A refusal (its hourly cap, a bad key, an unknown template) or a typryx
+nobody could reach is a different fact from an unanswered verdict -- an
+infrastructure failure, not a verdict -- and it still fails the run the
+same way it always did, naming the HTTP status and typryx's code, never
+the key, with nothing saved.
 
 When a typed case's `expected` is set (a human label: `"true"`/`"false"` for
 a `noul` template, a decimal integer string for a `score` template), grading
@@ -529,9 +548,17 @@ Agent Passport envelope (`taipanbox.dev/agent-event/v0.2`, see the
 
 | `type` | severity | `data` |
 |---|---|---|
-| `eval_run` | info | `model`, `cases`, `mean_score`, `total_tokens`, `total_cost_usd` |
+| `eval_run` | info | `model`, `cases`, `mean_score`, `total_tokens`, `total_cost_usd`, `unanswered` |
 | `quality_score` | info | `case_id`, `value`, `tokens`, `cost_usd` |
 | `quality_drift` | high | `baseline_id`, `window`, `mean_score`, `delta`, `verdict`, `baseline_n`, `t_statistic`, `ci_low`, `ci_high` |
+
+`eval_run.data.unanswered` (added 2026-09-25) is how many typed cases in the
+run came back unanswered and were counted apart rather than scored -- see
+[A typed verdict from typryx](#a-typed-verdict-from-typryx). This is an
+addition to `data`, not a change to a fixed shape: the envelope's `data`
+object is open (`additionalProperties: true`) and agent-passport's SPEC.md
+Sec 6.2 registers only `eval_run`'s type name and severity for verdryx, no
+closed field list.
 
 Same rules as Engram's exporter: **opt-in** (no file, no thread, no
 allocation unless a path is configured), **fail-open** (a write failure is

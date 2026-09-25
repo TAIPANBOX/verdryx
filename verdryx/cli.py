@@ -59,7 +59,7 @@ from verdryx.graders import (
     TypryxError,
     build_graders,
 )
-from verdryx.models import Baseline, EvalRun, EvalSet, GraderKind, Score
+from verdryx.models import Baseline, EvalRun, EvalSet, GraderKind, Score, Unanswered
 from verdryx.otel import OTLPExporter, Span
 from verdryx.store import Store
 
@@ -184,9 +184,14 @@ def run_eval(
     below), naming --typed-url as the flag that enables it.
 
     A GraderKind.TYPED case whose grader answers unanswered raises
-    TypedUnanswered (graders.py); this function does not catch it -- see
-    that exception's own docstring for why, and verdryx.cli._cmd_eval for
-    where it is finally turned into a clean CLI death.
+    TypedUnanswered (graders.py); THIS function catches it, per case, and
+    appends a models.Unanswered to the returned EvalRun's own `unanswered`
+    list instead of letting it end the run -- see that exception's own
+    docstring for the decision and why it changed. TypryxError (a refusal,
+    an unreachable typryx) is a different fact -- an infrastructure
+    failure, not a verdict -- and is NOT caught here: it propagates out of
+    this function, and verdryx.cli._cmd_eval is what turns it into a clean
+    CLI death, before the store is ever opened.
     """
     graders = (
         graders
@@ -199,6 +204,7 @@ def run_eval(
         typed_grader.run_id = run_id
     started_at = datetime.now(tz=UTC)
     scores: list[Score] = []
+    unanswered: list[Unanswered] = []
 
     for case in evalset.cases:
         grader = graders.get(case.grader)
@@ -234,7 +240,16 @@ def run_eval(
             output, completion_tokens, completion_cost_usd = case.prompt, 0, 0.0
         else:
             output, completion_tokens, completion_cost_usd = adapter.complete(case.prompt)
-        result = grader.grade(case, output)
+        try:
+            result = grader.grade(case, output)
+        except TypedUnanswered as e:
+            # Counted apart, not scored: see TypedUnanswered's own
+            # docstring and models.Unanswered. Only a TypedGrader can ever
+            # raise this, so this except is reachable for GraderKind.TYPED
+            # cases alone -- every other grader kind's grade() call passes
+            # straight through unchanged.
+            unanswered.append(Unanswered(case_id=e.case_id, answer_id=e.answer_id, reason=e.reason))
+            continue
         scores.append(
             Score(
                 case_id=case.id,
@@ -258,6 +273,7 @@ def run_eval(
         # nothing to join on. Never defaulted to the model or to anything
         # else: a run nobody attributed stays unattributed.
         agent_id=agent_id,
+        unanswered=unanswered,
     )
 
 
@@ -277,13 +293,18 @@ def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
         run = run_eval(
             evalset, adapter, model=args.model, agent_id=args.agent_id, typed_client=typed_client
         )
-    except (TypedUnanswered, TypryxError) as e:
-        # run_eval deliberately does not catch these (see TypedUnanswered's
-        # own docstring): an unanswered verdict, a typryx refusal such as
-        # its hourly cap, and a typryx nobody could reach all leave the run
-        # unmeasured. This is where each becomes a clean CLI death instead
-        # of a raw traceback; TypryxError's message never carries the key.
-        # Nothing is saved: we die before ever reaching Store.open() below.
+    except TypryxError as e:
+        # A refusal (its hourly cap, a bad key, an unknown template) or a
+        # typryx nobody could reach is an infrastructure failure, not a
+        # verdict -- run_eval does not catch this, so it is where it
+        # becomes a clean CLI death instead of a raw traceback;
+        # TypryxError's message never carries the key. Nothing is saved:
+        # we die before ever reaching Store.open() below.
+        #
+        # An unanswered verdict (TypedUnanswered) is NOT here: run_eval
+        # catches it per case and continues, so it reaches this point as
+        # part of an ordinary, complete EvalRun -- see EvalRun.unanswered
+        # and the printout below.
         _die(str(e))
 
     db_path = args.db or config.db_path
@@ -313,6 +334,14 @@ def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
                 "mean_score": run.mean_score,
                 "total_tokens": run.total_tokens,
                 "total_cost_usd": run.total_cost_usd,
+                # The envelope's `data` object is open (agent-passport
+                # SPEC.md Sec 6.2 registers only the type name and severity
+                # for the "verdryx" row, no closed field list for eval_run
+                # itself; tests/fixtures/agent-event.v0.2.schema.json's
+                # `data` is `additionalProperties: true`), so this is an
+                # addition, not a change to a fixed shape. 0 for every run
+                # that has no unanswered cases, never omitted.
+                "unanswered": len(run.unanswered),
             },
             run_id=run.id,
         )
@@ -338,14 +367,31 @@ def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
     try:
         subject = f", agent={run.agent_id}" if run.agent_id else ", no agent id"
         print(f"\nEval run {run.id}  (model={run.model}{subject}, db={db_path})\n")
-        if not run.scores:
+        if not run.scores and not run.unanswered:
             print("  (no cases)\n")
             return
         for score in run.scores:
             print(f"  [{score.value:.2f}] {score.case_id}")
-        print(
-            f"\n  mean score: {run.mean_score:.3f}   cases: {len(run.scores)}   tokens: {run.total_tokens}\n"
-        )
+        if run.scores:
+            print(
+                f"\n  mean score: {run.mean_score:.3f}   cases: {len(run.scores)}   tokens: {run.total_tokens}\n"
+            )
+        else:
+            # Invariant 8 (CLAUDE.md): an unmeasured indicator is never a
+            # zero. Every case in this run came back unanswered, so there
+            # is no mean to report -- printing 0.000 here would read as a
+            # confident "every case scored zero", the opposite fact from
+            # "nothing could be asked at all".
+            print(f"\n  mean score: unmeasured (0 of {run.cases_asked} answered)\n")
+        if run.unanswered:
+            reason_counts: dict[str, int] = {}
+            for u in run.unanswered:
+                reason_counts[u.reason] = reason_counts.get(u.reason, 0) + 1
+            reasons = ", ".join(f"{reason}: {count}" for reason, count in reason_counts.items())
+            print(f"  unanswered: {len(run.unanswered)} of {run.cases_asked} asked ({reasons})")
+            for u in run.unanswered:
+                print(f"    {u.case_id}  (answer_id={u.answer_id})")
+            print()
     finally:
         # A one-shot CLI process exits as soon as this handler returns, on
         # every path including the early return above -- an exported span
@@ -361,6 +407,18 @@ def _cmd_baseline(args: argparse.Namespace, config: Config) -> None:
         run = store.load_run(args.run_id)
         if run is None:
             _die(f"no such eval run: {args.run_id!r}")
+        if not run.scores:
+            # A baseline snapshots mean_score, which is 0.0 for zero scored
+            # cases (models.EvalRun.mean_score) -- the same float a perfect
+            # run that scored every case 0.0 would produce. Snapshotting
+            # that as a baseline would be a fabricated number: invariant 8
+            # (CLAUDE.md), an unmeasured indicator is never a zero, applies
+            # to a baseline exactly as it does to the run it comes from.
+            unanswered_note = f" ({len(run.unanswered)} unanswered)" if run.unanswered else ""
+            _die(
+                f"eval run {run.id!r} has zero scored cases{unanswered_note}: a baseline of "
+                "an unmeasured mean would be a fabricated number"
+            )
         baseline = Baseline(
             id=str(uuid.uuid4()),
             eval_run_id=run.id,
@@ -392,9 +450,22 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
         if not recent:
             _die("no eval runs found to compare against the baseline")
 
-        report = compute_drift(
-            recent, baseline, threshold=args.threshold, baseline_run=baseline_run
-        )
+        try:
+            report = compute_drift(
+                recent, baseline, threshold=args.threshold, baseline_run=baseline_run
+            )
+        except ValueError as e:
+            # compute_drift pools Scores per CASE across the window, so a
+            # run that came back fully unanswered (zero Scores) already
+            # contributes nothing to the mean rather than entering it as a
+            # 0.0 -- see test_drift.py's
+            # test_compute_drift_ignores_empty_runs_mixed_with_scored_ones.
+            # This branch is for when EVERY run in the window is like that:
+            # there is then no case anywhere to average, and compute_drift
+            # already refuses ("no scores found ...") rather than letting a
+            # mean read as 0.0. This is where that refusal becomes a clean
+            # CLI death instead of a raw traceback.
+            _die(str(e))
 
     print(f"\nDrift vs baseline {report.baseline_id}  (window={report.window})\n")
     print(f"  mean score: {report.mean_score:.3f}")

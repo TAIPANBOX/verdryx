@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from verdryx.models import Baseline, EvalRun, Score
+from verdryx.models import Baseline, EvalRun, Score, Unanswered
 from verdryx.store import SCHEMA_VERSION, Store
 
 
@@ -425,6 +425,165 @@ def test_list_runs_carries_the_subject_too() -> None:
         store.save_run(run)
         listed = store.list_runs()
     assert [r.agent_id for r in listed] == ["agent://acme.example/support/bot"]
+
+
+# ------------------------------------------------------------------
+# The `unanswered` table
+#
+# @decided 2026-09-25: an unanswered typed case (verdryx#42) is counted
+# apart with its reason instead of failing the whole run -- see
+# features/typed-grader.feature.
+# ------------------------------------------------------------------
+
+
+def _run_with_unanswered(run_id: str = "r1") -> EvalRun:
+    return EvalRun(
+        id=run_id,
+        model="stub",
+        started_at=datetime(2026, 7, 1, tzinfo=UTC),
+        finished_at=datetime(2026, 7, 1, 0, 1, tzinfo=UTC),
+        scores=[Score(case_id="c1", value=1.0, tokens=10, cost_usd=0.01)],
+        unanswered=[
+            Unanswered(case_id="c2", answer_id="ans-1", reason="timeout"),
+            Unanswered(case_id="c3", answer_id="ans-2", reason="label_mass_too_low"),
+        ],
+    )
+
+
+def test_save_and_load_run_round_trips_unanswered_cases(tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    with Store.open(db_path) as store:
+        store.save_run(_run_with_unanswered())
+    with Store.open(db_path) as store:
+        loaded = store.load_run("r1")
+    assert loaded is not None
+    assert len(loaded.scores) == 1
+    assert [(u.case_id, u.answer_id, u.reason) for u in loaded.unanswered] == [
+        ("c2", "ans-1", "timeout"),
+        ("c3", "ans-2", "label_mass_too_low"),
+    ]
+
+
+def test_a_run_with_no_unanswered_cases_round_trips_an_empty_list(tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    with Store.open(db_path) as store:
+        store.save_run(_run())
+    with Store.open(db_path) as store:
+        loaded = store.load_run("r1")
+    assert loaded is not None
+    assert loaded.unanswered == []
+
+
+def test_save_run_replaces_existing_unanswered_rows() -> None:
+    """Same shape as save_run's own DELETE-then-INSERT for scores: a second
+    save under the same run id must not leave the first save's unanswered
+    rows behind."""
+    with Store.open(":memory:") as store:
+        store.save_run(_run_with_unanswered())
+        second = _run_with_unanswered()
+        second.unanswered = [Unanswered(case_id="c9", answer_id="ans-9", reason="timeout")]
+        store.save_run(second)
+        loaded = store.load_run("r1")
+    assert loaded is not None
+    assert [u.case_id for u in loaded.unanswered] == ["c9"]
+
+
+def test_list_runs_carries_unanswered_too() -> None:
+    with Store.open(":memory:") as store:
+        store.save_run(_run_with_unanswered())
+        listed = store.list_runs()
+    assert len(listed) == 1
+    assert [u.case_id for u in listed[0].unanswered] == ["c2", "c3"]
+
+
+#: `_DDL` exactly as 785c8d1 (the typed-grader PR, this file's own prior
+#: commit) left it: `eval_runs` already has `agent_id`, but there is no
+#: `unanswered` table at all -- the shape every store on somebody's disk has
+#: before this change.
+_PRE_UNANSWERED_DDL = """
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id            TEXT PRIMARY KEY,
+    model         TEXT NOT NULL,
+    started_at    TEXT NOT NULL,
+    finished_at   TEXT,
+    agent_id      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS scores (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL REFERENCES eval_runs(id),
+    case_id       TEXT NOT NULL,
+    value         REAL NOT NULL,
+    tokens        INTEGER NOT NULL DEFAULT 0,
+    cost_usd      REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE INDEX IF NOT EXISTS idx_scores_run_id ON scores(run_id);
+
+CREATE TABLE IF NOT EXISTS baselines (
+    id            TEXT PRIMARY KEY,
+    eval_run_id   TEXT NOT NULL REFERENCES eval_runs(id),
+    mean_score    REAL NOT NULL,
+    created_at    TEXT NOT NULL,
+    label         TEXT NOT NULL DEFAULT ''
+);
+"""
+
+
+def _write_pre_unanswered_store(db_path) -> None:
+    """A store as 785c8d1 left it: one run, two scores, no `unanswered` table."""
+    raw = sqlite3.connect(str(db_path))
+    try:
+        raw.executescript(_PRE_UNANSWERED_DDL)
+        raw.execute(
+            "INSERT INTO eval_runs (id, model, started_at, finished_at, agent_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("old-run", "stub", "2026-07-01T00:00:00+00:00", "2026-07-01T00:01:00+00:00", None),
+        )
+        raw.executemany(
+            "INSERT INTO scores (run_id, case_id, value, tokens, cost_usd) VALUES (?, ?, ?, ?, ?)",
+            [("old-run", "c1", 1.0, 10, 0.01), ("old-run", "c2", 0.5, 20, 0.02)],
+        )
+        raw.execute("PRAGMA user_version = 1")
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_an_old_store_with_no_unanswered_table_gains_it_and_reads_the_old_run(tmp_path) -> None:
+    """CREATE TABLE IF NOT EXISTS is the whole migration story for a new
+    table, and it is exercised here against a store produced from 785c8d1's
+    own DDL, not a description of one."""
+    db_path = tmp_path / "store.db"
+    _write_pre_unanswered_store(db_path)
+    with Store.open(db_path) as store:
+        loaded = store.load_run("old-run")
+    assert loaded is not None
+    assert [s.case_id for s in loaded.scores] == ["c1", "c2"]
+    assert loaded.unanswered == []
+
+    raw = sqlite3.connect(str(db_path))
+    try:
+        tables = {
+            row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    finally:
+        raw.close()
+    assert "unanswered" in tables
+
+
+def test_schema_version_did_not_move_for_the_unanswered_table(tmp_path) -> None:
+    """@claude: a new table is not a changed column on an existing one, so
+    CREATE TABLE IF NOT EXISTS is the whole story and an older build never
+    selects a table it does not know about -- same reasoning as the
+    agent_id column, see store.py's own SCHEMA_VERSION comment, which also
+    names the hazard this leaves: the Genaryx console, which opens this
+    file directly, still shows a mean with no unanswered count until it is
+    rebuilt against this table."""
+    db_path = tmp_path / "store.db"
+    with Store.open(db_path):
+        pass
+    assert _user_version(db_path) == SCHEMA_VERSION == 1
 
 
 # ------------------------------------------------------------------

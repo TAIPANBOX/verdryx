@@ -6,6 +6,16 @@ Feature: A typed verdict from typryx, and the human label back to it
   names a typryx address, and where an eval case already carries a human
   label that label goes back to typryx so its calibration can be scored.
 
+  @decided 2026-09-25: an unanswered typed case is counted apart with its
+  reason, gets no score and is never a zero, and the run is saved with
+  that count shown beside the mean. An eval run used to fail whole on one
+  unanswered case (measured through a local backend: 3 of 60 asks come
+  back unanswered every time, so a 60-case run could never complete, and
+  labels already posted for earlier cases stayed in typryx's ledger while
+  the run itself was thrown away); a refusal or an unreachable typryx is a
+  different fact -- an infrastructure failure, not a verdict -- and still
+  fails the run.
+
   # @test:test_build_graders_no_typed_client_means_no_typed_grader
   Scenario: Nobody gets the typed grader without asking for it
     Given verdryx builds its graders with no typryx address
@@ -23,11 +33,25 @@ Feature: A typed verdict from typryx, and the human label back to it
     When verdryx asks typryx about it
     Then the state it sends holds the task and the final answer and nothing else
 
-  # @test:test_eval_command_typed_unanswered_dies_naming_case_and_reason_and_saves_nothing
+  # @test:test_eval_command_typed_unanswered_case_is_counted_not_fatal_and_run_saved
   Scenario: An unanswered verdict is not a zero
-    Given typryx answers unanswered for a case
-    When verdryx grades the case
-    Then the run fails naming the case and the reason, and no score is stored
+    Given typryx answers unanswered for one case of a run
+    When verdryx grades the run
+    Then that case has no score and is counted as unanswered with its reason
+    And the run is saved and its mean is taken over the answered cases only
+
+  # @test:test_eval_command_typed_all_unanswered_run_has_no_mean_and_cannot_baseline
+  Scenario: A run nobody could answer has no mean
+    Given typryx answers unanswered for every case of a run
+    When verdryx grades the run
+    Then the run reports its mean as unmeasured rather than as zero
+    And it cannot become a baseline
+
+  # @test:test_eval_command_typed_refusal_still_fails_the_run_and_saves_nothing
+  Scenario: A refusal is not an unanswered verdict
+    Given typryx refuses a request
+    When verdryx grades the run
+    Then the run fails naming the status and code, and nothing is saved
 
   # @test:test_typed_grader_posts_noul_human_label_as_outcome
   Scenario: A human label reaches typryx calibration

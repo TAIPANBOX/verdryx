@@ -275,6 +275,38 @@ class Score:
 
 
 @dataclass
+class Unanswered:
+    """One eval case typryx could not answer.
+
+    `graders.TypedGrader.grade` raises `graders.TypedUnanswered` (carrying
+    exactly these three fields) when typryx's response has `unanswered:
+    true`; `cli.run_eval` catches that per case and appends one of these to
+    `EvalRun.unanswered` instead of letting it end the whole run. It never
+    becomes a `Score`: verdryx invariant 8 (CLAUDE.md) says an unmeasured
+    indicator is never a zero, and a fabricated `Score(value=0.0)` here
+    would be indistinguishable from a real, confident "no".
+
+    `answer_id`/`reason` are typryx's own, unmodified, so an operator can
+    trace one back to typryx's own record; `reason` is what the printout
+    groups by (e.g. "label_mass_too_low").
+
+    `@decided 2026-09-25` (paraphrase): an unanswered typed case is counted
+    apart with its reason, gets no score and is never a zero, and the run
+    is saved with that count shown beside the mean -- see
+    features/typed-grader.feature. Before this, a single unanswered case
+    failed the whole run (verdryx#42's own gap): a 60-case run against a
+    real backend could never complete (3 of 60 asks come back unanswered
+    every time, measured through a local Ollama backend on 2026-09-25), and
+    any outcomes already posted for earlier cases stayed in typryx's ledger
+    while the run itself was thrown away.
+    """
+
+    case_id: str
+    answer_id: str
+    reason: str
+
+
+@dataclass
 class EvalRun:
     """One execution of an EvalSet against one model.
 
@@ -311,13 +343,41 @@ class EvalRun:
     finished_at: datetime | None = None
     scores: list[Score] = field(default_factory=list)
     agent_id: str | None = None
+    #: Typed cases typryx could not answer, counted apart from `scores`
+    #: rather than scored 0.0 or failing the run -- see `Unanswered`.
+    #: Default empty: every non-typed run, and every typed run that ran
+    #: before this field existed (an older store's row hydrates this as
+    #: `[]`, never a guess -- see store.py's SCHEMA_VERSION comment).
+    unanswered: list[Unanswered] = field(default_factory=list)
 
     @property
     def mean_score(self) -> float:
-        """Mean of all case scores, or 0.0 if the run has no scores yet."""
+        """Mean of all SCORED case scores, or 0.0 if none were scored yet.
+
+        Unaffected by `unanswered`: an Unanswered entry never becomes a
+        Score, so it was never in this sum to begin with, and a run where
+        every case came back unanswered still returns 0.0 here -- the same
+        float a run with no cases at all would return. The two are NOT the
+        same fact, and this property alone cannot tell them apart; that is
+        exactly why `cases_asked` exists and why `cli._cmd_eval`'s printout
+        checks `scores` before trusting this number (see the "unmeasured"
+        line there rather than printing 0.000).
+        """
         if not self.scores:
             return 0.0
         return sum(s.value for s in self.scores) / len(self.scores)
+
+    @property
+    def cases_asked(self) -> int:
+        """Scored + unanswered: how many cases actually got asked at all.
+
+        `len(scores)` alone undercounts whenever some cases came back
+        unanswered -- this is the denominator the printout's "N of M asked"
+        and "0 of M answered" lines use (verdryx.cli._cmd_eval), and the
+        one a reader needs beside `mean_score` to tell "every case failed"
+        from "nothing could be asked".
+        """
+        return len(self.scores) + len(self.unanswered)
 
     @property
     def total_tokens(self) -> int:
