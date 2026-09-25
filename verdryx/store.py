@@ -1,4 +1,4 @@
-"""SQLite persistence for eval runs, scores, and baselines.
+"""SQLite persistence for eval runs, scores, unanswered cases, and baselines.
 
 Mirrors engram/store.py's style: a thin wrapper around a single sqlite3
 connection, an embedded DDL string run through executescript() on open, and
@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from verdryx.models import Baseline, EvalRun, Score
+from verdryx.models import Baseline, EvalRun, Score, Unanswered
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS eval_runs (
@@ -43,6 +43,26 @@ CREATE TABLE IF NOT EXISTS baselines (
     created_at    TEXT NOT NULL,
     label         TEXT NOT NULL DEFAULT ''
 );
+
+-- A typed case typryx could not answer (models.Unanswered): never a Score,
+-- counted apart with its own reason instead of failing the whole run --
+-- @decided 2026-09-25, see features/typed-grader.feature. A NEW table, not
+-- a widened column, so CREATE TABLE IF NOT EXISTS is the whole migration
+-- story here exactly as it is for every other table above: an older store
+-- gains this table empty the next time anything opens it, and a build that
+-- predates this table simply never selects from it. See the SCHEMA_VERSION
+-- comment below for why that column-vs-table distinction is what decides
+-- whether the version stamp has to move, and for the one hazard this
+-- leaves un-gated.
+CREATE TABLE IF NOT EXISTS unanswered (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL REFERENCES eval_runs(id),
+    case_id       TEXT NOT NULL,
+    answer_id     TEXT NOT NULL,
+    reason        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_unanswered_run_id ON unanswered(run_id);
 """
 
 
@@ -76,6 +96,26 @@ def _parse_iso(s: str) -> datetime:
 #: mints `uuid.uuid4()` per run, so the only writer never presents an id that
 #: already exists. If a rewrite path is ever added, that is the change that
 #: earns the version bump, not this one.
+#:
+#: @claude, 2026-09-25: it did NOT move for the `unanswered` table either,
+#: and for a different reason than the `agent_id` column above -- a new
+#: TABLE, not a widened one. Nothing in this module selects `*` from
+#: `eval_runs`, and an older build's own SQL never names `unanswered` at
+#: all, so meeting that table on a newer-written store cannot be
+#: misinterpreted the way meeting an unexpected COLUMN could be: the older
+#: build simply never looks at it, exactly as it already never looks at any
+#: table this module might add in the future. `CREATE TABLE IF NOT EXISTS`
+#: is the whole migration story for a table the way it already is for the
+#: three above it.
+#:
+#: The hazard this leaves is real and belongs beside the one above rather
+#: than instead of it: the Genaryx console opens this file directly as its
+#: quality plane (components.json), and a Genaryx build that predates this
+#: change reads `eval_runs`/`scores` exactly as before and shows a mean with
+#: no unanswered count at all -- not wrong, since that mean is still the
+#: mean over scored cases, but silently partial for any run that had
+#: unanswered cases. Nothing here can gate that; it is fixed only by
+#: rebuilding the console image against this version of verdryx.
 SCHEMA_VERSION = 1
 
 #: Columns added to `eval_runs` after the table first shipped, in the order
@@ -235,6 +275,11 @@ class Store:
             "INSERT INTO scores (run_id, case_id, value, tokens, cost_usd) VALUES (?, ?, ?, ?, ?)",
             [(run.id, s.case_id, s.value, s.tokens, s.cost_usd) for s in run.scores],
         )
+        self._conn.execute("DELETE FROM unanswered WHERE run_id = ?", (run.id,))
+        self._conn.executemany(
+            "INSERT INTO unanswered (run_id, case_id, answer_id, reason) VALUES (?, ?, ?, ?)",
+            [(run.id, u.case_id, u.answer_id, u.reason) for u in run.unanswered],
+        )
         self._conn.commit()
 
     def load_run(self, run_id: str) -> EvalRun | None:
@@ -277,6 +322,14 @@ class Store:
             )
             for r in score_rows
         ]
+        unanswered_rows: list[Any] = self._conn.execute(
+            "SELECT case_id, answer_id, reason FROM unanswered WHERE run_id = ? ORDER BY id",
+            (row["id"],),
+        ).fetchall()
+        unanswered = [
+            Unanswered(case_id=r["case_id"], answer_id=r["answer_id"], reason=r["reason"])
+            for r in unanswered_rows
+        ]
         return EvalRun(
             id=row["id"],
             model=row["model"],
@@ -288,6 +341,11 @@ class Store:
             # name, a default agent, the first subject the store holds) would
             # attribute somebody's runs to an agent that never made them.
             agent_id=row["agent_id"],
+            # [] for a run that predates the `unanswered` table too -- a
+            # store that old never had a case counted apart from a Score in
+            # the first place, so an empty list is the honest read, not a
+            # guess (same shape as agent_id=None above).
+            unanswered=unanswered,
         )
 
     def score_records(self) -> list[dict[str, Any]]:

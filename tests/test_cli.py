@@ -21,7 +21,7 @@ import pytest
 
 from verdryx import __version__
 from verdryx.cli import main, run_eval
-from verdryx.graders import AnthropicAdapter, StubLLMAdapter
+from verdryx.graders import AnthropicAdapter, StubLLMAdapter, TypryxClient
 from verdryx.models import Baseline, EvalCase, EvalSet, GraderKind
 from verdryx.store import Store
 
@@ -254,6 +254,63 @@ def test_run_eval_dies_clearly_when_adapter_lacks_complete_with_tools(capsys) ->
     assert "tools-1" in err
 
 
+def test_run_eval_catches_typed_unanswered_per_case_and_continues(typryx_fake) -> None:
+    """The layer below main()/_cmd_eval: run_eval itself is what catches
+    TypedUnanswered now (verdryx#42's own gap was here -- it had no
+    try/except around a grader's grade() call at all, so the exception
+    reached _cmd_eval and killed the whole run). One scored case, one
+    unanswered case, in the same run."""
+    typryx_fake.script(
+        "/v1/ask",
+        200,
+        {
+            "answer_id": "ans-scored",
+            "template": "eval.outcome_met",
+            "template_version": "v1",
+            "type": "noul",
+            "answer": 0.7,
+            "probabilities": {"true": 0.7, "false": 0.3},
+            "backend": "stub",
+            "model": "stub-0",
+            "latency_ms": 1,
+            "held_back_fields": 0,
+            "cost_usd": 0.0,
+        },
+    )
+    typryx_fake.script(
+        "/v1/ask",
+        200,
+        {
+            "answer_id": "ans-unanswered",
+            "template": "eval.outcome_met",
+            "template_version": "v1",
+            "type": "noul",
+            "unanswered": True,
+            "reason": "label_mass_too_low",
+            "held_back_fields": 0,
+        },
+    )
+    evalset = EvalSet(
+        id="typed-mix",
+        cases=[
+            EvalCase(id="typed-1", prompt="a", grader=GraderKind.TYPED),
+            EvalCase(id="typed-2", prompt="b", grader=GraderKind.TYPED),
+        ],
+    )
+    client = TypryxClient(typryx_fake.url, "k1")
+    adapter = StubLLMAdapter()
+
+    run = run_eval(evalset, adapter, model="stub", typed_client=client)
+
+    assert [s.case_id for s in run.scores] == ["typed-1"]
+    assert run.scores[0].value == pytest.approx(0.7)
+    assert [u.case_id for u in run.unanswered] == ["typed-2"]
+    assert run.unanswered[0].answer_id == "ans-unanswered"
+    assert run.unanswered[0].reason == "label_mass_too_low"
+    assert run.mean_score == pytest.approx(0.7)
+    assert run.cases_asked == 2
+
+
 # ------------------------------------------------------------------
 # CLI: eval -> baseline -> drift -> cost-per-correct, end to end via main()
 # ------------------------------------------------------------------
@@ -347,6 +404,12 @@ def test_eval_command_with_events_emits_quality_score_and_eval_run(
     eval_run_event = next(e for e in events if e["type"] == "eval_run")
     assert eval_run_event["data"]["cases"] == len(sample_evalset.cases)
     assert eval_run_event["data"]["mean_score"] == pytest.approx(1.0)
+    # The envelope's `data` object is open (tests/fixtures/agent-event.v0.2
+    # .schema.json: additionalProperties: true), and agent-passport's SPEC.md
+    # Sec 6.2 registers only the type name and severity for `verdryx`, no
+    # closed field list for `eval_run` itself -- so this is an addition, not
+    # a change to a fixed shape. @claude reading, verified against both.
+    assert eval_run_event["data"]["unanswered"] == 0
     assert all(e["agent_id"] == agent_id for e in events)
 
 
@@ -494,6 +557,115 @@ def test_drift_command_unknown_baseline_dies_cleanly(tmp_path, capsys) -> None:
     assert "no such baseline" in err
 
 
+def test_drift_command_excludes_a_zero_scored_run_from_the_window_mean(
+    typryx_fake, sample_evalset_path, tmp_path, capsys
+) -> None:
+    """A run in the drift window that came back fully unanswered contributes
+    no Scores at all -- Store.save_run persists its scores table exactly as
+    empty -- so compute_drift's own per-case pooling (it sums every Score
+    across the window, not a mean of each run's own mean_score) already
+    excludes it rather than reading it as a 0.0 that would drag the pooled
+    mean down. @claude: read against compute_drift and
+    test_compute_drift_ignores_empty_runs_mixed_with_scored_ones in
+    test_drift.py, which already pins this at the function level; this pins
+    the same fact through the CLI end to end."""
+    db = tmp_path / "store.db"
+    main(["eval", str(sample_evalset_path), "--model", "stub", "--db", str(db)])
+    capsys.readouterr()
+    with Store.open(db) as store:
+        run_id = store.list_runs()[0].id
+    main(["baseline", run_id, "--db", str(db)])
+    capsys.readouterr()
+    with Store.open(db) as store:
+        baseline_id = store.list_baselines()[0].id
+
+    typryx_fake.script("/v1/ask", 200, _unanswered_answer("ans-window"))
+    evalset_path = _typed_evalset_path(tmp_path)
+    key_file = tmp_path / "typryx.key"
+    key_file.write_text("k1")
+    main(
+        [
+            "eval",
+            str(evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--typed-url",
+            typryx_fake.url,
+            "--typed-key-file",
+            str(key_file),
+        ]
+    )
+    capsys.readouterr()
+
+    main(["drift", "--baseline", baseline_id, "--db", str(db), "--window", "2"])
+    out = capsys.readouterr().out
+    # sample_evalset_path scores every case 1.0 (see other drift tests
+    # above); a 0.0 leaking in from the unanswered run's excluded case
+    # would show here as anything less than 1.000.
+    assert "mean score: 1.000" in out
+
+
+def test_drift_command_window_with_no_scored_cases_at_all_dies_cleanly(
+    typryx_fake, tmp_path, capsys
+) -> None:
+    """If EVERY run pooled into the window came back unanswered,
+    compute_drift has no case at all to average and already refuses
+    (ValueError: "no scores found ... cannot compute drift") rather than
+    letting a mean enter as 0.0 -- this is where that refusal becomes a
+    clean CLI death instead of a raw traceback reaching the operator."""
+    typryx_fake.script("/v1/ask", 200, _noul_answer("ans-baseline", 0.9))
+    evalset_path = _typed_evalset_path(tmp_path)
+    key_file = tmp_path / "typryx.key"
+    key_file.write_text("k1")
+    db = tmp_path / "store.db"
+    main(
+        [
+            "eval",
+            str(evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--typed-url",
+            typryx_fake.url,
+            "--typed-key-file",
+            str(key_file),
+        ]
+    )
+    capsys.readouterr()
+    with Store.open(db) as store:
+        run_id = store.list_runs()[0].id
+    main(["baseline", run_id, "--db", str(db)])
+    capsys.readouterr()
+    with Store.open(db) as store:
+        baseline_id = store.list_baselines()[0].id
+
+    typryx_fake.script("/v1/ask", 200, _unanswered_answer("ans-window"))
+    main(
+        [
+            "eval",
+            str(evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--typed-url",
+            typryx_fake.url,
+            "--typed-key-file",
+            str(key_file),
+        ]
+    )
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["drift", "--baseline", baseline_id, "--db", str(db), "--window", "1"])
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "no scores" in err
+
+
 def _insert_dangling_baseline(
     db_path: Path, baseline_id: str, eval_run_id: str, mean_score: float
 ) -> None:
@@ -570,6 +742,44 @@ def test_baseline_command_unknown_run_dies_cleanly(tmp_path, capsys) -> None:
     assert exc_info.value.code == 1
     err = capsys.readouterr().err
     assert "no such eval run" in err
+
+
+def test_baseline_command_refuses_a_run_with_zero_scored_cases(
+    typryx_fake, tmp_path, capsys
+) -> None:
+    """@decided 2026-09-25: a baseline of an unmeasured mean would be a
+    fabricated number -- it would read as "every case scored 0.0" when the
+    honest fact is that nothing could be asked at all. Same test as
+    features/typed-grader.feature's "A run nobody could answer has no
+    mean", "And it cannot become a baseline" line."""
+    typryx_fake.script("/v1/ask", 200, _unanswered_answer("ans-1"))
+    evalset_path = _typed_evalset_path(tmp_path)
+    key_file = tmp_path / "typryx.key"
+    key_file.write_text("k1")
+    db = tmp_path / "store.db"
+    main(
+        [
+            "eval",
+            str(evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--typed-url",
+            typryx_fake.url,
+            "--typed-key-file",
+            str(key_file),
+        ]
+    )
+    capsys.readouterr()
+    with Store.open(db) as store:
+        run_id = store.list_runs()[0].id
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["baseline", run_id, "--db", str(db)])
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "zero scored cases" in err
 
 
 def test_cost_per_correct_command_prints_report(tmp_path, capsys) -> None:
@@ -998,6 +1208,34 @@ def _typed_evalset_path(tmp_path: Path, *, expected: str | None = None) -> Path:
     return path
 
 
+def _typed_evalset_path_multi(tmp_path: Path, case_ids: list[str]) -> Path:
+    """Like _typed_evalset_path, but with several typed cases in one set --
+    needed to exercise a run that is a MIX of scored and unanswered cases,
+    which a single-case set can never be."""
+    evalset = EvalSet(
+        id="typed-multi",
+        cases=[
+            EvalCase(id=cid, prompt=f"did the agent finish {cid}?", grader=GraderKind.TYPED)
+            for cid in case_ids
+        ],
+    )
+    path = tmp_path / "typed-multi.json"
+    evalset.save(path)
+    return path
+
+
+def _unanswered_answer(answer_id: str, reason: str = "label_mass_too_low") -> dict:
+    return {
+        "answer_id": answer_id,
+        "template": "eval.outcome_met",
+        "template_version": "v1",
+        "type": "noul",
+        "unanswered": True,
+        "reason": reason,
+        "held_back_fields": 0,
+    }
+
+
 def test_eval_command_typed_case_without_typed_url_dies_naming_the_flag(tmp_path) -> None:
     """Same "no grader configured" path every other missing grader kind
     already takes (test_run_eval_raises_for_case_grader_with_no_configured_grader
@@ -1122,58 +1360,105 @@ def test_eval_command_typed_key_file_flag_overrides_env_var(
     assert request["key"] == "flag-key"
 
 
-def test_eval_command_typed_unanswered_dies_naming_case_and_reason_and_saves_nothing(
+def test_eval_command_typed_unanswered_case_is_counted_not_fatal_and_run_saved(
     typryx_fake, tmp_path, capsys
 ) -> None:
-    typryx_fake.script(
-        "/v1/ask",
-        200,
-        {
-            "answer_id": "ans-unanswered",
-            "template": "eval.outcome_met",
-            "template_version": "v1",
-            "type": "noul",
-            "unanswered": True,
-            "reason": "timeout",
-            "held_back_fields": 0,
-        },
-    )
-    evalset_path = _typed_evalset_path(tmp_path)
+    """verdryx#42 made this die and lose the whole run (9 labels already
+    posted to typryx stayed there while the run itself was thrown away, and
+    a 60-case run against a real backend could never complete: 3 of 60 asks
+    come back unanswered every time, @measured through a local Ollama
+    qwen2.5:7b on 2026-09-25). @decided 2026-09-25: the unanswered case is
+    counted apart with its reason instead, scores nothing, and the run
+    completes and is saved with its mean taken over the answered cases
+    only -- features/typed-grader.feature's "An unanswered verdict is not a
+    zero"."""
+    typryx_fake.script("/v1/ask", 200, _noul_answer("ans-scored", 0.8))
+    typryx_fake.script("/v1/ask", 200, _unanswered_answer("ans-unanswered", "label_mass_too_low"))
+    evalset_path = _typed_evalset_path_multi(tmp_path, ["typed-1", "typed-2"])
     key_file = tmp_path / "typryx.key"
     key_file.write_text("k1")
     db = tmp_path / "store.db"
 
-    with pytest.raises(SystemExit) as exc_info:
-        main(
-            [
-                "eval",
-                str(evalset_path),
-                "--model",
-                "stub",
-                "--db",
-                str(db),
-                "--typed-url",
-                typryx_fake.url,
-                "--typed-key-file",
-                str(key_file),
-            ]
-        )
-    assert exc_info.value.code == 1
-    err = capsys.readouterr().err
-    assert "typed-1" in err
-    assert "ans-unanswered" in err
-    assert "timeout" in err
-    # Nothing was saved: the store was never even opened.
-    assert not db.exists()
+    main(
+        [
+            "eval",
+            str(evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--typed-url",
+            typryx_fake.url,
+            "--typed-key-file",
+            str(key_file),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "mean score: 0.800" in out
+    assert "unanswered: 1 of 2 asked (label_mass_too_low: 1)" in out
+    assert "typed-2" in out
+    assert "ans-unanswered" in out
+
+    with Store.open(db) as store:
+        [run] = store.list_runs()
+    assert [s.case_id for s in run.scores] == ["typed-1"]
+    assert [u.case_id for u in run.unanswered] == ["typed-2"]
+    assert run.unanswered[0].answer_id == "ans-unanswered"
+    assert run.unanswered[0].reason == "label_mass_too_low"
 
 
-def test_eval_command_typed_refusal_dies_cleanly_naming_status_and_code(
+def test_eval_command_typed_all_unanswered_run_has_no_mean_and_cannot_baseline(
     typryx_fake, tmp_path, capsys
 ) -> None:
-    """A typryx that refuses (here its hourly cap) or cannot be reached ends
-    the run the same way an unanswered verdict does: a one-line death naming
-    the status and typryx's code, never a traceback, never the key, and
-    nothing saved."""
+    """features/typed-grader.feature's "A run nobody could answer has no
+    mean": invariant 8 (CLAUDE.md), an unmeasured indicator is never a
+    zero, applies to the whole run exactly as it does to one case."""
+    typryx_fake.script("/v1/ask", 200, _unanswered_answer("ans-1"))
+    typryx_fake.script("/v1/ask", 200, _unanswered_answer("ans-2"))
+    evalset_path = _typed_evalset_path_multi(tmp_path, ["typed-1", "typed-2"])
+    key_file = tmp_path / "typryx.key"
+    key_file.write_text("k1")
+    db = tmp_path / "store.db"
+
+    main(
+        [
+            "eval",
+            str(evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--typed-url",
+            typryx_fake.url,
+            "--typed-key-file",
+            str(key_file),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "mean score: unmeasured (0 of 2 answered)" in out
+    assert "unanswered: 2 of 2 asked (label_mass_too_low: 2)" in out
+
+    with Store.open(db) as store:
+        [run] = store.list_runs()
+    assert run.scores == []
+    assert len(run.unanswered) == 2
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["baseline", run.id, "--db", str(db)])
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "zero scored cases" in err
+
+
+def test_eval_command_typed_refusal_still_fails_the_run_and_saves_nothing(
+    typryx_fake, tmp_path, capsys
+) -> None:
+    """features/typed-grader.feature's "A refusal is not an unanswered
+    verdict": a typryx that refuses (here its hourly cap) or cannot be
+    reached is an infrastructure failure, not a verdict, so it still ends
+    the run with a one-line death naming the status and typryx's code,
+    never a traceback, never the key, and nothing saved -- unlike an
+    unanswered case, which the run above now survives."""
     typryx_fake.script("/v1/ask", 429, {"error": "over_hourly_cap"})
     evalset_path = _typed_evalset_path(tmp_path)
     key_file = tmp_path / "typryx.key"

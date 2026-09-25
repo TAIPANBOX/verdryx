@@ -504,17 +504,32 @@ class TypedUnanswered(Exception):  # noqa: N818 -- named for what it carries, no
 
     An unanswered typed verdict never becomes a score: verdryx invariant 8
     (CLAUDE.md) says an unmeasured indicator is never a zero, and 0.0 here
-    would be indistinguishable from a real, confident "no". Nothing between
-    TypedGrader.grade and verdryx.cli's _cmd_eval catches this -- run_eval
-    itself has no try/except around a grader's own grade() call for any
-    grader kind, typed included, so the whole eval run fails and nothing is
-    saved to the store; _cmd_eval is what turns it into a clean CLI death
-    naming the case, the answer_id and typryx's own reason, instead of a
-    raw traceback.
+    would be indistinguishable from a real, confident "no".
+
+    `verdryx.cli.run_eval` catches this per case (its own try/except around
+    a grade() call, typed cases only) and appends a `models.Unanswered`
+    carrying case_id/answer_id/reason to `EvalRun.unanswered` instead of
+    letting it end the run: `@decided 2026-09-25` (paraphrase), an
+    unanswered typed case is counted apart with its reason, gets no score
+    and is never a zero, and the run is saved with that count shown beside
+    the mean -- see features/typed-grader.feature. This is a change from
+    verdryx#42, which raised this all the way out of run_eval and failed
+    the whole run on ONE unanswered case: measured against a real backend
+    on 2026-09-25 (a local Ollama qwen2.5:7b), 3 of 60 asks come back
+    unanswered every time, so a 60-case run could never complete, and any
+    outcomes already posted to typryx for earlier cases in that run stayed
+    in its ledger while the run itself was thrown away.
+
+    A refusal (TypryxError) or a connection failure is a different fact --
+    an infrastructure failure, not a verdict -- and still fails the run:
+    run_eval does not catch TypryxError, and verdryx.cli._cmd_eval turns it
+    into a clean CLI death naming the status and typryx's code, before the
+    store is ever opened.
 
     @claude: this exception shape (raise, don't warn-and-continue, and
     don't invent a sentinel score) is my own reading of invariant 8 applied
-    to an external typed verdict, not a decision made for me elsewhere.
+    to an external typed verdict, not a decision made for me elsewhere; the
+    decision that it counts rather than fails the run is `@decided`, above.
     """
 
     def __init__(self, case_id: str, answer_id: str, reason: str) -> None:
@@ -659,7 +674,8 @@ class TypedGrader:
         ordering.
 
     An unanswered result (`unanswered: true` in typryx's response) never
-    becomes a number: see TypedUnanswered above.
+    becomes a number, and never fails the run outright: see TypedUnanswered
+    above for what verdryx.cli.run_eval does with it instead.
 
     H2, the human label: when `case.expected` is present, after a
     successful (answered, non-choice) grade, `case.expected` is converted
