@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB.svg)
-![tests](https://img.shields.io/badge/tests-408-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-409-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/phase-1%20(mvp)-success.svg)
 
@@ -263,14 +263,17 @@ verdryx eval typed-cases.json --model stub --db verdryx.db \
   `eval.outcome_met`).
 
 A typed case sends only `{"task": case.prompt, "final_answer": output}` to
-typryx -- no rubric, no case id, nothing else. The verdict becomes the
+typryx: no rubric, no case id, nothing else. The verdict becomes the
 `Score`: a `noul` template's `probabilities["true"]` directly, a `score`
 template's probability-weighted mean level normalised to `[0, 1]`; a
 `choice` template has no order and is refused rather than scored. When
-typryx answers `unanswered` (a cap hit, a timeout, a malformed backend
-reply), that is never turned into a `0.0` -- verdict CLAUDE.md invariant 8
-says an unmeasured indicator is never a zero -- the whole eval run fails
-instead, naming the case, typryx's `answer_id`, and its reason.
+typryx answers `unanswered` (a timeout, a backend error, a model that
+returned no probabilities), that is never turned into a `0.0`, because
+CLAUDE.md invariant 8 says an unmeasured indicator is never a zero. The
+whole eval run fails instead, naming the case, typryx's `answer_id` and its
+reason. A refusal (its hourly cap, a bad key, an unknown template) or a
+typryx nobody could reach fails the run the same way, naming the HTTP
+status and typryx's code, never the key.
 
 When a typed case's `expected` is set (a human label: `"true"`/`"false"` for
 a `noul` template, a decimal integer string for a `score` template), grading

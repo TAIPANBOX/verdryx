@@ -56,6 +56,7 @@ from verdryx.graders import (
     TypedGrader,
     TypedUnanswered,
     TypryxClient,
+    TypryxError,
     build_graders,
 )
 from verdryx.models import Baseline, EvalRun, EvalSet, GraderKind, Score
@@ -98,7 +99,7 @@ def _otlp_from_config(config: Config) -> OTLPExporter | None:
 def _build_typed_client(args: argparse.Namespace, config: Config) -> TypryxClient | None:
     """`--typed-url` is the only thing that constructs a TypryxClient: no
     environment variable enables the typed grader on its own (CLAUDE.md
-    invariant 5's cousin here; scripts/no-paid-by-default.sh's AST check
+    invariant 5, checks 4 and 5 of scripts/no-paid-by-default.sh: its AST check
     holds both this function being the one construction site and this
     `if args.typed_url` guard). Returns None when the flag is absent, so
     build_graders() never registers GraderKind.TYPED for an ordinary run.
@@ -276,11 +277,13 @@ def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
         run = run_eval(
             evalset, adapter, model=args.model, agent_id=args.agent_id, typed_client=typed_client
         )
-    except TypedUnanswered as e:
-        # run_eval deliberately does not catch this (see TypedUnanswered's
-        # own docstring); this is where it becomes a clean CLI death
-        # instead of a raw traceback. Nothing is saved: we die before ever
-        # reaching Store.open() below.
+    except (TypedUnanswered, TypryxError) as e:
+        # run_eval deliberately does not catch these (see TypedUnanswered's
+        # own docstring): an unanswered verdict, a typryx refusal such as
+        # its hourly cap, and a typryx nobody could reach all leave the run
+        # unmeasured. This is where each becomes a clean CLI death instead
+        # of a raw traceback; TypryxError's message never carries the key.
+        # Nothing is saved: we die before ever reaching Store.open() below.
         _die(str(e))
 
     db_path = args.db or config.db_path

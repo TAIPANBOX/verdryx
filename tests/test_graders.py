@@ -926,7 +926,7 @@ def _choice_answer(*, answer_id: str = "ans-3") -> dict[str, object]:
     }
 
 
-def _unanswered(*, answer_id: str = "ans-4", reason: str = "over_hourly_cap") -> dict[str, object]:
+def _unanswered(*, answer_id: str = "ans-4", reason: str = "timeout") -> dict[str, object]:
     return {
         "answer_id": answer_id,
         "template": "eval.outcome_met",
@@ -1080,16 +1080,16 @@ def test_typed_grader_choice_template_is_refused(typryx_fake) -> None:
 
 
 def test_typed_grader_unanswered_raises_typed_unanswered(typryx_fake) -> None:
-    typryx_fake.script("/v1/ask", 200, _unanswered(answer_id="ans-9", reason="over_hourly_cap"))
+    typryx_fake.script("/v1/ask", 200, _unanswered(answer_id="ans-9", reason="timeout"))
     client = TypryxClient(typryx_fake.url, "k1")
     case = _typed_case(case_id="budget-case")
     with pytest.raises(TypedUnanswered) as exc_info:
         TypedGrader(client).grade(case, "output")
     assert exc_info.value.case_id == "budget-case"
     assert exc_info.value.answer_id == "ans-9"
-    assert exc_info.value.reason == "over_hourly_cap"
+    assert exc_info.value.reason == "timeout"
     assert "budget-case" in str(exc_info.value)
-    assert "over_hourly_cap" in str(exc_info.value)
+    assert "timeout" in str(exc_info.value)
 
 
 def test_typed_grader_unanswered_never_posts_an_outcome_even_with_expected(typryx_fake) -> None:
@@ -1214,13 +1214,13 @@ def test_typryx_client_repr_never_includes_the_key() -> None:
     assert "a-very-secret-key" not in str(client)
 
 
-def test_typryx_error_cap_exceeded_surfaced_with_status_and_code(typryx_fake) -> None:
-    typryx_fake.script("/v1/ask", 429, {"error": "cap_exceeded"})
+def test_typryx_error_hourly_cap_surfaced_with_status_and_code(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 429, {"error": "over_hourly_cap"})
     client = TypryxClient(typryx_fake.url, "k1")
     with pytest.raises(TypryxError) as exc_info:
         client.ask({"task": "t", "final_answer": "a"}, None)
     assert exc_info.value.status == 429
-    assert exc_info.value.code == "cap_exceeded"
+    assert exc_info.value.code == "over_hourly_cap"
 
 
 def test_typryx_error_unknown_template_surfaced_with_status_and_code(typryx_fake) -> None:

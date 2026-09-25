@@ -487,7 +487,7 @@ class TypryxError(Exception):
     Carries `status` (the HTTP status typryx returned, or None when no
     response was ever received at all -- a connection failure) and `code`
     (typryx's own `error` field, e.g. "unauthorized", "unknown_template",
-    "cap_exceeded"; None when a response body could not be read as JSON, or
+    "over_hourly_cap"; None when a response body could not be read as JSON, or
     on a connection failure). The message never includes the key: it names
     the URL and the status/code only, so this exception is safe to print or
     log in full.
@@ -644,10 +644,9 @@ class TypedGrader:
 
     Only `case.prompt` (sent as `task`) and the model's `output` (sent as
     `final_answer`) leave verdryx -- no rubric, no case id, no run
-    metadata. `TypryxClient.ask` is given `run_id=None`; verdryx.cli wires
-    the eval run's own run_id through a separate TypryxClient-level call so
-    the two records join (see cli.py's --typed-url handling), not through
-    this grader.
+    metadata. The eval run's own id goes to typryx as `run_id`, set on
+    `self.run_id` by verdryx.cli.run_eval before the first case, so the two
+    records join; it is not part of the state.
 
     Value, by the answered type typryx reports:
       - noul: `probabilities["true"]`, already a probability in [0, 1].
@@ -683,8 +682,8 @@ class TypedGrader:
         #: generates the run's own id and before any case is graded, so
         #: every /v1/ask this grader makes during the run carries that same
         #: run_id and typryx's own record joins to it -- without a second
-        #: TypryxClient construction site (see CLAUDE.md invariant 5's
-        #: cousin, held by scripts/no-paid-by-default.sh's AST check) or a
+        #: TypryxClient construction site (CLAUDE.md invariant 5, held by
+        #: check 5 of scripts/no-paid-by-default.sh) or a
         #: change to the Grader protocol's grade(case, output) shape. None
         #: for a TypedGrader used directly, e.g. in a test.
         self.run_id: str | None = None
@@ -747,8 +746,8 @@ def build_graders(
 
     typed_client works exactly like judge_adapter: GraderKind.TYPED is
     registered only when one is given (verdryx.cli's --typed-url is the
-    only thing that constructs one -- see CLAUDE.md invariant 5's cousin
-    here, held by scripts/no-paid-by-default.sh). Nothing else about the
+    only thing that constructs one: CLAUDE.md invariant 5, held by
+    checks 4 and 5 of scripts/no-paid-by-default.sh). Nothing else about the
     defaults changes.
     """
     graders: dict[GraderKind, Grader | ToolTraceGrader] = {

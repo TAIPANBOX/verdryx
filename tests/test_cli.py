@@ -1134,7 +1134,7 @@ def test_eval_command_typed_unanswered_dies_naming_case_and_reason_and_saves_not
             "template_version": "v1",
             "type": "noul",
             "unanswered": True,
-            "reason": "over_hourly_cap",
+            "reason": "timeout",
             "held_back_fields": 0,
         },
     )
@@ -1162,8 +1162,44 @@ def test_eval_command_typed_unanswered_dies_naming_case_and_reason_and_saves_not
     err = capsys.readouterr().err
     assert "typed-1" in err
     assert "ans-unanswered" in err
-    assert "over_hourly_cap" in err
+    assert "timeout" in err
     # Nothing was saved: the store was never even opened.
+    assert not db.exists()
+
+
+def test_eval_command_typed_refusal_dies_cleanly_naming_status_and_code(
+    typryx_fake, tmp_path, capsys
+) -> None:
+    """A typryx that refuses (here its hourly cap) or cannot be reached ends
+    the run the same way an unanswered verdict does: a one-line death naming
+    the status and typryx's code, never a traceback, never the key, and
+    nothing saved."""
+    typryx_fake.script("/v1/ask", 429, {"error": "over_hourly_cap"})
+    evalset_path = _typed_evalset_path(tmp_path)
+    key_file = tmp_path / "typryx.key"
+    key_file.write_text("sekrit-key-value")
+    db = tmp_path / "store.db"
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "eval",
+                str(evalset_path),
+                "--model",
+                "stub",
+                "--db",
+                str(db),
+                "--typed-url",
+                typryx_fake.url,
+                "--typed-key-file",
+                str(key_file),
+            ]
+        )
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "429" in err
+    assert "over_hourly_cap" in err
+    assert "sekrit-key-value" not in err
     assert not db.exists()
 
 
