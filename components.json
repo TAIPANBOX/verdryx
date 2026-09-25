@@ -54,6 +54,9 @@
           },
           "VERDRYX_OTLP_ENDPOINT": {
             "required": false
+          },
+          "VERDRYX_TYPRYX_KEY_FILE": {
+            "required": false
           }
         },
         "missing_argument_exit_code": 2

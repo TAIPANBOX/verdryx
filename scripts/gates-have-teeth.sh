@@ -226,6 +226,21 @@ run_case "no-paid-by-default: --model acquires a default" fail \
 	"$(py 'edit("verdryx/cli.py", "        \"--model\",\n        required=True,", "        \"--model\",\n        required=True,\n        default=\"claude-opus-5\",")')" \
 	"has a default of"
 
+# The typryx cousin of the two cases above: build_graders() registering the
+# TYPED grader unconditionally is the exact shape that made LLM_JUDGE's own
+# check necessary, applied to a second external, possibly-paid service.
+run_case "no-paid-by-default: build_graders registers TYPED unconditionally" fail \
+	'./scripts/no-paid-by-default.sh' \
+	"$(py 'edit("verdryx/graders.py", "    if typed_client is not None:\n        graders[GraderKind.TYPED] = TypedGrader(typed_client)\n    return graders", "    graders[GraderKind.TYPED] = TypedGrader(typed_client)\n    return graders")')" \
+	"registered a TYPED grader"
+
+# A second TypryxClient construction site, anywhere in verdryx/, not behind
+# the --typed-url branch -- the same shape as a second AnthropicAdapter site.
+run_case "no-paid-by-default: a second TypryxClient construction site" fail \
+	'./scripts/no-paid-by-default.sh' \
+	"$(py 'edit("verdryx/cli.py", "def _read_key_file(path: str) -> str:", "_SECOND_TYPRYX_CLIENT_FOR_TEETH_TEST = TypryxClient(\"http://127.0.0.1:1\", \"unused\")\n\n\ndef _read_key_file(path: str) -> str:")')" \
+	"constructed in 2 place"
+
 run_case "readme-numbers: a stale test badge" fail \
 	'./scripts/readme-numbers.sh' \
 	"$(py 'import re

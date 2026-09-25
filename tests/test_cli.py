@@ -25,6 +25,11 @@ from verdryx.graders import AnthropicAdapter, StubLLMAdapter
 from verdryx.models import Baseline, EvalCase, EvalSet, GraderKind
 from verdryx.store import Store
 
+# The TypryxFake fixture used below (tests/conftest.py's `typryx_fake`) sets
+# scripted /v1/ask and /v1/outcome responses matching the shapes in
+# tests/test_graders.py's own helpers -- duplicated inline here (rather than
+# imported) since these are end-to-end CLI tests, not TypedGrader unit tests.
+
 #: A minimal, provider-shape tool definition, reused across the
 #: GraderKind.TOOL_TRACE tests below.
 _LOOKUP_ORDER_TOOL = {
@@ -951,3 +956,334 @@ def test_slo_command_counts_runs_that_carry_no_identity(
     main(["slo", "--traces", str(traces), "--min-events", "10"])
     out = capsys.readouterr().out
     assert "10 run(s) (33.3%) carry no agent_id and are in no subject's numbers" in out
+
+
+# ------------------------------------------------------------------
+# `verdryx eval --typed-url ...`: the typed grader wired end to end through
+# main(), against a real loopback typryx stand-in (tests/conftest.py's
+# `typryx_fake` fixture).
+# ------------------------------------------------------------------
+
+
+def _noul_answer(answer_id: str, p_true: float) -> dict:
+    return {
+        "answer_id": answer_id,
+        "template": "eval.outcome_met",
+        "template_version": "v1",
+        "type": "noul",
+        "answer": p_true,
+        "probabilities": {"true": p_true, "false": 1 - p_true},
+        "backend": "stub",
+        "model": "stub-0",
+        "latency_ms": 2,
+        "held_back_fields": 0,
+        "cost_usd": 0.0,
+    }
+
+
+def _typed_evalset_path(tmp_path: Path, *, expected: str | None = None) -> Path:
+    evalset = EvalSet(
+        id="typed-v1",
+        cases=[
+            EvalCase(
+                id="typed-1",
+                prompt="did the agent finish?",
+                grader=GraderKind.TYPED,
+                expected=expected,
+            )
+        ],
+    )
+    path = tmp_path / "typed.json"
+    evalset.save(path)
+    return path
+
+
+def test_eval_command_typed_case_without_typed_url_dies_naming_the_flag(tmp_path) -> None:
+    """Same "no grader configured" path every other missing grader kind
+    already takes (test_run_eval_raises_for_case_grader_with_no_configured_grader
+    above, an unhandled ValueError -- nothing in main()/_cmd_eval wraps
+    run_eval() for this generic case), extended to name --typed-url."""
+    evalset_path = _typed_evalset_path(tmp_path)
+    db = tmp_path / "store.db"
+    with pytest.raises(ValueError, match="no grader configured") as exc_info:
+        main(["eval", str(evalset_path), "--model", "stub", "--db", str(db)])
+    assert "--typed-url" in str(exc_info.value)
+
+
+def test_eval_command_typed_url_without_key_file_dies_cleanly(tmp_path, capsys) -> None:
+    evalset_path = _typed_evalset_path(tmp_path)
+    db = tmp_path / "store.db"
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "eval",
+                str(evalset_path),
+                "--model",
+                "stub",
+                "--db",
+                str(db),
+                "--typed-url",
+                "http://127.0.0.1:4320",
+            ]
+        )
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "--typed-key-file" in err
+    assert "VERDRYX_TYPRYX_KEY_FILE" in err
+
+
+def test_eval_command_typed_url_end_to_end_stores_a_run(typryx_fake, tmp_path, capsys) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer("ans-e2e", 0.8))
+    evalset_path = _typed_evalset_path(tmp_path)
+    key_file = tmp_path / "typryx.key"
+    key_file.write_text("k1\n")
+    db = tmp_path / "store.db"
+
+    main(
+        [
+            "eval",
+            str(evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--typed-url",
+            typryx_fake.url,
+            "--typed-key-file",
+            str(key_file),
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "mean score: 0.800" in out
+
+    with Store.open(db) as store:
+        runs = store.list_runs()
+    assert len(runs) == 1
+    assert runs[0].scores[0].value == pytest.approx(0.8)
+
+    [request] = typryx_fake.requests
+    assert request["key"] == "k1"  # the key file's contents, stripped of the trailing newline
+
+
+def test_eval_command_typed_key_file_from_env_var(
+    typryx_fake, tmp_path, monkeypatch, capsys
+) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer("ans-env", 0.5))
+    evalset_path = _typed_evalset_path(tmp_path)
+    key_file = tmp_path / "typryx.key"
+    key_file.write_text("env-key")
+    monkeypatch.setenv("VERDRYX_TYPRYX_KEY_FILE", str(key_file))
+    db = tmp_path / "store.db"
+
+    main(
+        [
+            "eval",
+            str(evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--typed-url",
+            typryx_fake.url,
+        ]
+    )
+    capsys.readouterr()
+    [request] = typryx_fake.requests
+    assert request["key"] == "env-key"
+
+
+def test_eval_command_typed_key_file_flag_overrides_env_var(
+    typryx_fake, tmp_path, monkeypatch
+) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer("ans-override", 0.5))
+    evalset_path = _typed_evalset_path(tmp_path)
+    env_key_file = tmp_path / "env.key"
+    env_key_file.write_text("env-key")
+    flag_key_file = tmp_path / "flag.key"
+    flag_key_file.write_text("flag-key")
+    monkeypatch.setenv("VERDRYX_TYPRYX_KEY_FILE", str(env_key_file))
+    db = tmp_path / "store.db"
+
+    main(
+        [
+            "eval",
+            str(evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--typed-url",
+            typryx_fake.url,
+            "--typed-key-file",
+            str(flag_key_file),
+        ]
+    )
+    [request] = typryx_fake.requests
+    assert request["key"] == "flag-key"
+
+
+def test_eval_command_typed_unanswered_dies_naming_case_and_reason_and_saves_nothing(
+    typryx_fake, tmp_path, capsys
+) -> None:
+    typryx_fake.script(
+        "/v1/ask",
+        200,
+        {
+            "answer_id": "ans-unanswered",
+            "template": "eval.outcome_met",
+            "template_version": "v1",
+            "type": "noul",
+            "unanswered": True,
+            "reason": "over_hourly_cap",
+            "held_back_fields": 0,
+        },
+    )
+    evalset_path = _typed_evalset_path(tmp_path)
+    key_file = tmp_path / "typryx.key"
+    key_file.write_text("k1")
+    db = tmp_path / "store.db"
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "eval",
+                str(evalset_path),
+                "--model",
+                "stub",
+                "--db",
+                str(db),
+                "--typed-url",
+                typryx_fake.url,
+                "--typed-key-file",
+                str(key_file),
+            ]
+        )
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "typed-1" in err
+    assert "ans-unanswered" in err
+    assert "over_hourly_cap" in err
+    # Nothing was saved: the store was never even opened.
+    assert not db.exists()
+
+
+def test_eval_command_typed_case_posts_human_label_back_to_typryx(
+    typryx_fake, tmp_path, capsys
+) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer("ans-label", 0.9))
+    typryx_fake.script(
+        "/v1/outcome",
+        200,
+        {"answer_id": "ans-label", "template": "eval.outcome_met", "template_version": "v1"},
+    )
+    evalset_path = _typed_evalset_path(tmp_path, expected="true")
+    key_file = tmp_path / "typryx.key"
+    key_file.write_text("k1")
+    db = tmp_path / "store.db"
+
+    main(
+        [
+            "eval",
+            str(evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--typed-url",
+            typryx_fake.url,
+            "--typed-key-file",
+            str(key_file),
+        ]
+    )
+    capsys.readouterr()
+    outcome_requests = [r for r in typryx_fake.requests if r["path"] == "/v1/outcome"]
+    assert len(outcome_requests) == 1
+    assert outcome_requests[0]["body"] == {
+        "answer_id": "ans-label",
+        "truth": True,
+        "source": "verdryx:evalset",
+    }
+
+
+def test_eval_command_typed_run_id_reaches_typryx(typryx_fake, tmp_path, capsys) -> None:
+    """The eval run's own run_id is sent as typryx's run_id, so the two
+    records join (the brief's own words for this)."""
+    typryx_fake.script("/v1/ask", 200, _noul_answer("ans-run", 0.5))
+    evalset_path = _typed_evalset_path(tmp_path)
+    key_file = tmp_path / "typryx.key"
+    key_file.write_text("k1")
+    db = tmp_path / "store.db"
+
+    main(
+        [
+            "eval",
+            str(evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--typed-url",
+            typryx_fake.url,
+            "--typed-key-file",
+            str(key_file),
+        ]
+    )
+    out = capsys.readouterr().out
+    run_id = out.split("Eval run ", 1)[1].split(" ", 1)[0]
+
+    [request] = typryx_fake.requests
+    assert request["body"]["run_id"] == run_id
+
+
+def test_eval_command_typed_key_file_unreadable_dies_cleanly(tmp_path, capsys) -> None:
+    evalset_path = _typed_evalset_path(tmp_path)
+    db = tmp_path / "store.db"
+    missing_key_file = tmp_path / "does-not-exist.key"
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "eval",
+                str(evalset_path),
+                "--model",
+                "stub",
+                "--db",
+                str(db),
+                "--typed-url",
+                "http://127.0.0.1:4320",
+                "--typed-key-file",
+                str(missing_key_file),
+            ]
+        )
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert str(missing_key_file) in err
+    assert "cannot read" in err
+
+
+def test_eval_command_typed_template_flag_is_sent_to_typryx(typryx_fake, tmp_path, capsys) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer("ans-tmpl", 0.6))
+    evalset_path = _typed_evalset_path(tmp_path)
+    key_file = tmp_path / "typryx.key"
+    key_file.write_text("k1")
+    db = tmp_path / "store.db"
+
+    main(
+        [
+            "eval",
+            str(evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--typed-url",
+            typryx_fake.url,
+            "--typed-key-file",
+            str(key_file),
+            "--typed-template",
+            "eval.answer_quality",
+        ]
+    )
+    capsys.readouterr()
+    [request] = typryx_fake.requests
+    assert request["body"]["template"] == "eval.answer_quality"

@@ -95,9 +95,10 @@ an absent invariant.
    the fix is in TokenFuse, not a locally invented column here.
    *(not enforced)*
 5. **A grader that costs money never runs by default.** The LLM judge is priced
-   per call. Any code path that could reach a paid provider must be explicitly
-   selected by the caller, and the default configuration must be the
-   deterministic graders. *(gate: `scripts/no-paid-by-default.sh`)*
+   per call, and so is typryx's own backend, an optional separate service
+   `TypedGrader` asks. Any code path that could reach a paid provider must be
+   explicitly selected by the caller, and the default configuration must be
+   the deterministic graders. *(gate: `scripts/no-paid-by-default.sh`)*
 
 6. **The test count this README states about the repository is checked
    against the repository.** The coverage figure the README also states is
@@ -269,7 +270,7 @@ write a check that exists, and it understates what this repository already
 refuses to let you do. Set a marker from evidence, both ways. Before writing
 that an invariant has no gate, look in `scripts/`.
 
-Invariant 5 is now `scripts/no-paid-by-default.sh`, and it checks all three of
+Invariant 5 is now `scripts/no-paid-by-default.sh`, and it checks all five of
 the ways that invariant currently holds, because losing any one is enough:
 
 1. `verdryx eval --model` is `required=True` with no default, so no invocation
@@ -278,16 +279,22 @@ the ways that invariant currently holds, because losing any one is enough:
    so the priced grader cannot appear because a caller forgot to opt out.
 3. `AnthropicAdapter` has exactly one construction site, behind the explicit
    `model != "stub"` branch, so the priced path stays easy to find.
+4. `build_graders()` with no `typed_client` registers no `TYPED` grader,
+   the same shape as point 2 applied to typryx (an optional, separate
+   service that may run a paid backend of its own).
+5. `TypryxClient` has exactly one construction site in `verdryx/`, behind an
+   `if` whose test mentions `typed_url` -- the same shape as point 3.
 
-Points 1 and 3 are read from the AST; point 2 is checked by importing the
-package and calling it, because a behavioural claim deserves to be run rather
-than read. The script builds a throwaway venv for that import instead of
-assuming a prepared machine, since a gate that only runs on one machine is a
-gate that does not run.
+Points 1, 3 and 5 are read from the AST; points 2 and 4 are checked by
+importing the package and calling it, because a behavioural claim deserves to
+be run rather than read. The script builds a throwaway venv for that import
+instead of assuming a prepared machine, since a gate that only runs on one
+machine is a gate that does not run.
 
-Verified by breaking three ways: a paid default on `--model`, a second
-`AnthropicAdapter` construction site, and `build_graders()` registering the
-judge unconditionally.
+Verified by breaking five ways: a paid default on `--model`, a second
+`AnthropicAdapter` construction site, `build_graders()` registering the judge
+unconditionally, `build_graders()` registering the typed grader
+unconditionally, and a second `TypryxClient` construction site.
 
 Invariants 3 and 4 are judgement and probably stay judgement.
 

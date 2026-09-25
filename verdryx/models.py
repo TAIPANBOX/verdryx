@@ -49,6 +49,12 @@ class GraderKind(StrEnum):
     OUTCOME_TAG = "outcome_tag"
     LLM_JUDGE = "llm_judge"
     TOOL_TRACE = "tool_trace"
+    #: Asks typryx (an optional, separate service) a typed question about
+    #: the case's output instead of a priced judge writing a number in
+    #: prose. Only registered when the caller supplies a typryx address
+    #: (see graders.build_graders and cli.py's --typed-url); see
+    #: graders.TypedGrader.
+    TYPED = "typed"
 
 
 @dataclass
@@ -66,7 +72,13 @@ class EvalCase:
             to prompt a model with when grading an already-recorded
             production outcome; see verdryx.cli's eval loop.
         expected: Ground truth for ExactGrader/RegexGrader. For RegexGrader
-            this is a pattern, not a literal string.
+            this is a pattern, not a literal string. For GraderKind.TYPED,
+            this is instead the human label for the case, if the caller has
+            one: not validated here, since typryx's answer type (noul,
+            score, or choice) is only known once the case is actually asked
+            (see graders.TypedGrader.grade). Optional even for a typed case:
+            a case with no expected value is graded but never posts an
+            outcome back to typryx.
         rubric: Grading instructions for LLMJudgeGrader.
         grader: Which GraderKind grades this case. Defaults to EXACT.
         tools: Provider-shape tool definitions passed to the adapter

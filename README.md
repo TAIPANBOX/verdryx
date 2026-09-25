@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB.svg)
-![tests](https://img.shields.io/badge/tests-367-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-408-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/phase-1%20(mvp)-success.svg)
 
@@ -14,8 +14,8 @@
 
 </div>
 
-Line coverage of the `verdryx` package: **97%** (`1359/1405` statements).
-`@measured .venv/bin/pytest --cov=verdryx --cov-report=term-missing 2026-09-16`.
+Line coverage of the `verdryx` package: **97%** (`1475/1521` statements).
+`@measured .venv/bin/pytest --cov=verdryx --cov-report=term-missing 2026-09-25`.
 Unlike the tests badge above, this figure is not gated (see CLAUDE.md invariant
 11): recomputing it inside a gate would mean running the full suite inside a
 gate, which is what the other gates already run once per CI job, so it is
@@ -148,7 +148,7 @@ asks for without special-casing.
 | Stage | What it covers |
 |---|---|
 | **Eval runner** | `verdryx.cli.run_eval` / `verdryx eval`: loads an `EvalSet` (a list of `EvalCase` prompts), calls a model for each case, grades the output, and stores the result as an `EvalRun` of per-case `Score`s in a local SQLite file |
-| **Five graders** | `verdryx/graders.py`: exact match, regex match, a `tokenfuse x-fuse-outcome` tag lookup, an LLM-judged rubric, and tool-call accuracy (which tools, in what order) |
+| **Six graders** | `verdryx/graders.py`: exact match, regex match, a `tokenfuse x-fuse-outcome` tag lookup, an LLM-judged rubric, tool-call accuracy (which tools, in what order), and a typed verdict from typryx (an optional, separate service), opt-in via `--typed-url` |
 | **Baselines and drift** | `verdryx/drift.py`: snapshot an `EvalRun`'s mean score as a `Baseline`, then compare a window of later runs against it |
 | **Cost per outcome** | `verdryx/costper.py`: given a flat export of `{outcome, cost_usd}` records, computes cost-per-resolved-case, cost-per-escalated, cost-per-abandoned, and overall |
 | **Opt-in event log** | `verdryx/events.py`: an NDJSON writer for the shared TAIPANBOX Agent Passport event envelope (schema `taipanbox.dev/agent-event/v0.2`, `source: "verdryx"`), so `eval_run`, `quality_score`, and `quality_drift` events reach the rest of the governance stack |
@@ -163,9 +163,9 @@ asks for without special-casing.
 </div>
 
 Every case resolves to a `Score` in `[0.0, 1.0]`; every drift check resolves
-to one of two named verdicts. Four graders share one shape (`grade()` on an
+to one of two named verdicts. Five graders share one shape (`grade()` on an
 `EvalCase`), so `verdryx eval` dispatches to whichever a case asks for; a
-fifth, `ToolTraceGrader`, is dispatched differently since it scores a tool
+sixth, `ToolTraceGrader`, is dispatched differently since it scores a tool
 trace rather than free text (see
 [Tool-call accuracy](#tool-call-accuracy-tool_trace) below):
 
@@ -175,6 +175,7 @@ trace rather than free text (see
 | `RegexGrader` | `expected`: a regex pattern | `re.search(expected, output)` matches |
 | `OutcomeTagGrader` | none (reads `output` itself) | `output` is a tag mapped to `1.0` in its table |
 | `LLMJudgeGrader` | `rubric`: grading instructions | the injected judge scores the rubric that high |
+| `TypedGrader` | `expected`: an optional human label, see below | a typryx `noul` template answers `true` with probability 1.0 |
 | `ToolTraceGrader` | `tools` / `expected_tools`: see below | the model's ordered tool calls exactly match `expected_tools` |
 
 `OutcomeTagGrader`'s default table is `{"case_resolved": 1.0, "escalated":
@@ -230,6 +231,54 @@ baseline run has at least two scores to compare against (it already loads
 that run to filter by model, so this is free). On `regressed`, and only
 then, it emits a `quality_drift` event (severity `high`) if an event log is
 configured; `on-track` checks are not reported as events.
+
+---
+
+## A typed verdict from typryx
+
+[typryx](https://github.com/TAIPANBOX/typryx) is a separate, optional
+service that answers a typed question (a choice, a score, or a yes/no,
+called `noul` there) with a probability instead of a sentence. `TypedGrader`
+asks it about a case's output instead of asking a priced judge to write a
+number in prose; unlike `LLMJudgeGrader`, this makes no direct outbound
+model call itself, only an HTTP request to typryx (stdlib `urllib`, no new
+dependency), and typryx's own backend is what may or may not be priced.
+
+Opt-in and nothing else:
+
+```sh
+verdryx eval typed-cases.json --model stub --db verdryx.db \
+    --typed-url http://127.0.0.1:4320 --typed-key-file /path/to/typryx.key
+```
+
+- `--typed-url URL` is the ONLY thing that enables `GraderKind.TYPED` cases.
+  No environment variable turns it on by itself: typryx may run a paid
+  backend, and CLAUDE.md invariant 5's own rule (a grader that costs money
+  never runs by default) applies here too, held the same way, by
+  `scripts/no-paid-by-default.sh`.
+- `--typed-key-file PATH` (or `$VERDRYX_TYPRYX_KEY_FILE`) names a file
+  holding the credential sent as `X-Typryx-Key`; the key is never accepted
+  on the command line, which would show up in `ps`.
+- `--typed-template ID` picks which typryx template to ask (default:
+  `eval.outcome_met`).
+
+A typed case sends only `{"task": case.prompt, "final_answer": output}` to
+typryx -- no rubric, no case id, nothing else. The verdict becomes the
+`Score`: a `noul` template's `probabilities["true"]` directly, a `score`
+template's probability-weighted mean level normalised to `[0, 1]`; a
+`choice` template has no order and is refused rather than scored. When
+typryx answers `unanswered` (a cap hit, a timeout, a malformed backend
+reply), that is never turned into a `0.0` -- verdict CLAUDE.md invariant 8
+says an unmeasured indicator is never a zero -- the whole eval run fails
+instead, naming the case, typryx's `answer_id`, and its reason.
+
+When a typed case's `expected` is set (a human label: `"true"`/`"false"` for
+a `noul` template, a decimal integer string for a `score` template), grading
+it also posts that label back to typryx as the outcome for the exact answer
+it was given, `source: "verdryx:evalset"`, so `typryx calibration` can score
+it later. No flag gates this half; posting an outcome is unpriced, and a
+label that does not fit the question's type is refused before anything is
+posted, never guessed.
 
 ---
 
@@ -455,12 +504,16 @@ A JSON file with an `id` and a list of `cases`:
 `id` must be stable across runs of the same eval set (it is not
 auto-generated): Scores are compared case-by-case over time, so a case's id
 needs to mean the same thing on every run. `grader` is one of `exact`
-(default), `regex`, `outcome_tag`, `llm_judge`, or `tool_trace`. For
+(default), `regex`, `outcome_tag`, `llm_judge`, `typed`, or `tool_trace`. For
 `outcome_tag` cases, `prompt` holds the outcome tag itself, since there is
 nothing to send a model when grading an already-recorded production outcome.
 A `tool_trace` case additionally requires `tools` and `expected_tools`, and
 those two fields are rejected on any other grader (see
-[Tool-call accuracy](#tool-call-accuracy-tool_trace)).
+[Tool-call accuracy](#tool-call-accuracy-tool_trace)). A `typed` case's
+`expected`, if present, is a human label posted back to typryx after
+grading rather than ground truth checked here (see
+[A typed verdict from typryx](#a-typed-verdict-from-typryx)); it needs
+`--typed-url` at eval time or the run dies naming that flag.
 
 ---
 
@@ -529,8 +582,12 @@ Read once, at process start, into `verdryx.config.Config`:
 | `VERDRYX_OTLP_ENDPOINT` | OTLP/HTTP collector base URL; one span per `eval`/`drift` run (default: unset, OTLP export disabled) |
 | `ANTHROPIC_API_KEY` | API key for the real `AnthropicAdapter` |
 | `ANTHROPIC_BASE_URL` | Proxy endpoint (e.g. TokenFuse) for the real `AnthropicAdapter` |
+| `VERDRYX_TYPRYX_KEY_FILE` | Fallback path to a file holding the typryx credential, used only when `--typed-key-file` is not given; never the key itself (default: unset) |
 
-CLI flags (`--db`, `--events`) always take precedence over the environment.
+CLI flags (`--db`, `--events`, `--typed-key-file`) always take precedence
+over the environment. `--typed-url` has no environment-variable equivalent
+at all: it is the one thing that turns the typed grader on, and an opt-in
+that a variable could also set would not be an opt-in.
 
 ### Where the store ends up
 
@@ -664,7 +721,8 @@ slipping?
 ## Status
 
 - [x] Eval runner (`verdryx eval`): `EvalSet`/`EvalCase` loader, per-case grading, `EvalRun` persisted to SQLite
-- [x] Five graders: `ExactGrader`, `RegexGrader`, `OutcomeTagGrader`, `LLMJudgeGrader`, `ToolTraceGrader`
+- [x] Six graders: `ExactGrader`, `RegexGrader`, `OutcomeTagGrader`, `LLMJudgeGrader`, `ToolTraceGrader`, `TypedGrader`
+- [x] Typed verdict from typryx (`--typed-url`): asks an optional, separate service a typed question about a case's output instead of a priced judge writing a number in prose; posts a human label in the eval set back to typryx's own calibration when the case has `expected`; opt-in only, no environment variable enables it on its own
 - [x] Tool-call accuracy (`tool_trace`): single-turn, no-execution grading of a model's own ordered `tool_use` names via `LLMAdapter.complete_with_tools`, exact-match/LCS-partial-credit scoring, drift/baselines work on its scores unchanged
 - [x] `StubLLMAdapter` (deterministic, offline, used by CI) and `AnthropicAdapter` (real Messages API, `base_url` proxy support, prompt-injection-resistant judge wrapping)
 - [x] Judge call pricing: `verdryx.pricing.PriceBook`, a dependency-free port of TokenFuse's default price book, populates `Score.cost_usd` for `llm_judge` cases

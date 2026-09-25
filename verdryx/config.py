@@ -19,6 +19,13 @@ ENV_OTLP_ENDPOINT = "VERDRYX_OTLP_ENDPOINT"
 ENV_ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 ENV_ANTHROPIC_BASE_URL = "ANTHROPIC_BASE_URL"
 
+#: Path to a file holding the typryx credential, the same shape typryx's own
+#: TYPRYX_OPENAI_KEY_FILE/TYPRYX_JEV_KEY_FILE use: a file path, never the key
+#: itself, so the key is never visible in `ps` or in this process's own
+#: environment dump. Only a fallback for --typed-key-file; --typed-url is
+#: what actually enables the typed grader (see cli.py).
+ENV_TYPRYX_KEY_FILE = "VERDRYX_TYPRYX_KEY_FILE"
+
 #: The installed stack's published home, where `stack-up` puts binaries, the
 #: shared venv and the per-tool stores. Honoured here for the same reason
 #: stack-up honours it: so the whole layout can be pointed at a scratch
@@ -100,6 +107,10 @@ class Config:
             to its own ANTHROPIC_API_KEY lookup.
         anthropic_base_url: Optional proxy endpoint (e.g. TokenFuse) for
             the real LLMJudgeGrader adapter.
+        typryx_key_file: Fallback path to a file holding the typryx
+            credential, used only when `verdryx eval` is not given
+            `--typed-key-file` directly. Never the key itself -- see
+            ENV_TYPRYX_KEY_FILE.
     """
 
     db_path: str
@@ -107,6 +118,7 @@ class Config:
     otlp_endpoint: str | None
     anthropic_api_key: str | None
     anthropic_base_url: str | None
+    typryx_key_file: str | None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
@@ -117,4 +129,5 @@ class Config:
             otlp_endpoint=e.get(ENV_OTLP_ENDPOINT) or None,
             anthropic_api_key=e.get(ENV_ANTHROPIC_API_KEY) or None,
             anthropic_base_url=e.get(ENV_ANTHROPIC_BASE_URL) or None,
+            typryx_key_file=e.get(ENV_TYPRYX_KEY_FILE) or None,
         )
