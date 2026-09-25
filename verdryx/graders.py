@@ -1,6 +1,6 @@
 """Grader implementations: turn one EvalCase's model output into a GradeResult.
 
-Five grader kinds, matching models.GraderKind:
+Six grader kinds, matching models.GraderKind:
 
 - ExactGrader: output == case.expected.
 - RegexGrader: case.expected is a regex, matched against output.
@@ -14,8 +14,14 @@ Five grader kinds, matching models.GraderKind:
   ``LLMAdapter.complete_with_tools``). Single-turn only -- it grades the
   model's first response, never executes a tool, and never becomes an
   agent runtime.
+- TypedGrader: asks typryx (an optional, separate service) a typed
+  question about the output -- a choice, a score, or a yes/no, called
+  "noul" there -- instead of asking a priced judge for a number in prose.
+  Only registered when the caller supplies a typryx address (see
+  build_graders and verdryx.cli's --typed-url); see TypryxClient and
+  TypedGrader below.
 
-The first four graders implement the same shape, ``grade(case, output) ->
+The first five graders implement the same shape, ``grade(case, output) ->
 GradeResult`` (Protocol ``Grader`` below), so verdryx.cli's eval loop can
 dispatch to whichever one an EvalCase asks for without a branch per grader
 kind. ToolTraceGrader is the one exception: it is still registered in the
@@ -26,15 +32,20 @@ left untouched.
 
 This module is measurement only. It grades what a model already produced; it
 never constructs a prompt intended to manipulate that model, and the only
-outbound network call it can make (AnthropicAdapter, when constructed with
-real credentials) asks an LLM to *score* a given output or *choose* tools it
-never executes, never to act on behalf of anyone.
+outbound network calls it can make (AnthropicAdapter, when constructed with
+real credentials; TypryxClient, when the caller names a typryx address) ask
+an LLM to *score* a given output or *choose* tools it never executes, or ask
+typryx a typed question about an output already produced -- never to act on
+behalf of anyone.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import urllib.error
+import urllib.request
 from typing import Any, Protocol, runtime_checkable
 
 from verdryx.models import DEFAULT_OUTCOME_SCORES, Completion, EvalCase, GradeResult, GraderKind
@@ -469,10 +480,258 @@ class AnthropicAdapter:
         )
 
 
+class TypryxError(Exception):
+    """Raised by TypryxClient on a non-2xx typryx response or a connection
+    failure.
+
+    Carries `status` (the HTTP status typryx returned, or None when no
+    response was ever received at all -- a connection failure) and `code`
+    (typryx's own `error` field, e.g. "unauthorized", "unknown_template",
+    "over_hourly_cap"; None when a response body could not be read as JSON, or
+    on a connection failure). The message never includes the key: it names
+    the URL and the status/code only, so this exception is safe to print or
+    log in full.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None, code: str | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
+class TypedUnanswered(Exception):  # noqa: N818 -- named for what it carries, not "Error"
+    """Raised by TypedGrader.grade when typryx answers a case unanswered.
+
+    An unanswered typed verdict never becomes a score: verdryx invariant 8
+    (CLAUDE.md) says an unmeasured indicator is never a zero, and 0.0 here
+    would be indistinguishable from a real, confident "no". Nothing between
+    TypedGrader.grade and verdryx.cli's _cmd_eval catches this -- run_eval
+    itself has no try/except around a grader's own grade() call for any
+    grader kind, typed included, so the whole eval run fails and nothing is
+    saved to the store; _cmd_eval is what turns it into a clean CLI death
+    naming the case, the answer_id and typryx's own reason, instead of a
+    raw traceback.
+
+    @claude: this exception shape (raise, don't warn-and-continue, and
+    don't invent a sentinel score) is my own reading of invariant 8 applied
+    to an external typed verdict, not a decision made for me elsewhere.
+    """
+
+    def __init__(self, case_id: str, answer_id: str, reason: str) -> None:
+        super().__init__(
+            f"case {case_id!r}: typryx did not answer (answer_id={answer_id!r}): {reason}"
+        )
+        self.case_id = case_id
+        self.answer_id = answer_id
+        self.reason = reason
+
+
+class TypryxClient:
+    """Talks to a typryx server over stdlib urllib -- no new runtime
+    dependency (verdryx invariant 1): typryx is HTTP+JSON, so there is
+    nothing an HTTP client library gives us that urllib.request and json
+    do not already have.
+
+    Args:
+        url: typryx's base URL, e.g. "http://127.0.0.1:4320". No trailing
+            slash is required; one is stripped if present.
+        key: the credential sent as the `X-Typryx-Key` header on every
+            request. Never logged, printed, or included in an exception
+            message or repr -- see TypryxError.
+        template: the template id `ask()` asks by default, e.g.
+            "eval.outcome_met".
+        timeout: seconds urllib waits for a response before giving up.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        key: str,
+        *,
+        template: str = "eval.outcome_met",
+        timeout: float = 30.0,
+    ) -> None:
+        self._url = url.rstrip("/")
+        self._key = key
+        self.template = template
+        self._timeout = timeout
+
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self._url}{path}",
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json", "X-Typryx-Key": self._key},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            code = None
+            try:
+                parsed = json.loads(exc.read().decode("utf-8"))
+                if isinstance(parsed, dict):
+                    code = parsed.get("error")
+            except (ValueError, UnicodeDecodeError):
+                code = None
+            raise TypryxError(
+                f"typryx refused the request (status={exc.code}, code={code!r})",
+                status=exc.code,
+                code=code,
+            ) from None
+        except OSError as exc:
+            # Covers urllib.error.URLError (a subclass of OSError) and a
+            # bare socket timeout/connection error that never reaches an
+            # HTTP response at all: no status, no code, only the URL.
+            raise TypryxError(f"could not reach typryx at {self._url}: {exc}") from None
+
+    def ask(self, state: dict[str, Any], run_id: str | None) -> dict[str, Any]:
+        """POST /v1/ask against `self.template`. Returns the parsed JSON
+        response verbatim; TypedGrader is what interprets it."""
+        payload: dict[str, Any] = {"template": self.template, "state": state}
+        if run_id is not None:
+            payload["run_id"] = run_id
+        return self._post("/v1/ask", payload)
+
+    def post_outcome(self, answer_id: str, truth: Any, source: str) -> dict[str, Any]:
+        """POST /v1/outcome. `truth` is JSON-serialised as given: a bool for
+        a noul answer, an int for a score answer (see _typed_truth, which
+        does that conversion before this is ever called)."""
+        return self._post("/v1/outcome", {"answer_id": answer_id, "truth": truth, "source": source})
+
+
+def _typed_truth(answer_type: str, expected: str, *, case_id: str, template: str) -> Any:
+    """Convert an EvalCase's human label (always a string on the case) to
+    the JSON type typryx's /v1/outcome expects for the answer's type: a
+    boolean for noul (case-insensitive "true"/"false"), a JSON integer for
+    score (a decimal integer string). A choice template never reaches this
+    function: TypedGrader.grade already raised ValueError before computing
+    a value at all, since a choice has no order and TypedGrader.grade never
+    gets far enough to look at case.expected.
+
+    Raises ValueError naming the case, the label, and the template for
+    anything that does not fit, BEFORE the caller posts anything: a guessed
+    truth is never sent.
+    """
+    if answer_type == "noul":
+        lowered = expected.strip().lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        raise ValueError(
+            f"case {case_id!r}: expected {expected!r} is not a yes or a no for the "
+            f"yes-or-no template {template!r}"
+        )
+    if answer_type == "score":
+        try:
+            return int(expected.strip())
+        except ValueError:
+            raise ValueError(
+                f"case {case_id!r}: expected {expected!r} is not a decimal integer for "
+                f"the score template {template!r}"
+            ) from None
+    raise ValueError(
+        f"case {case_id!r}: a human label cannot be posted to a {answer_type!r} template "
+        f"({template!r})"
+    )
+
+
+class TypedGrader:
+    """Asks typryx a typed question about a case's output and turns the
+    answer into a GradeResult.
+
+    Only `case.prompt` (sent as `task`) and the model's `output` (sent as
+    `final_answer`) leave verdryx -- no rubric, no case id, no run
+    metadata. The eval run's own id goes to typryx as `run_id`, set on
+    `self.run_id` by verdryx.cli.run_eval before the first case, so the two
+    records join; it is not part of the state.
+
+    Value, by the answered type typryx reports:
+      - noul: `probabilities["true"]`, already a probability in [0, 1].
+      - score: the probability-weighted mean level, normalised to [0, 1]:
+        `sum(i * p_i for i in range(n)) / (n - 1)`, n the number of levels
+        (probabilities keyed "0".."n-1").
+      - choice: raises ValueError naming the template. A choice has no
+        order, so it has no score -- this is not a missing feature, it is
+        the reason TypedGrader refuses rather than picking an arbitrary
+        ordering.
+
+    An unanswered result (`unanswered: true` in typryx's response) never
+    becomes a number: see TypedUnanswered above.
+
+    H2, the human label: when `case.expected` is present, after a
+    successful (answered, non-choice) grade, `case.expected` is converted
+    to the JSON type the answer's own type expects (see _typed_truth) and
+    posted to typryx as the outcome for that exact answer_id, with
+    `source="verdryx:evalset"`. No flag gates this half: the label already
+    lives in the eval set the caller chose to run, and posting it spends
+    nothing (POST /v1/outcome is unpriced). The conversion happens BEFORE
+    anything is posted, so a label that does not fit the question's type
+    raises ValueError naming the case and nothing is ever posted with a
+    guessed truth. A failed outcome post is not swallowed into a log
+    warning: it raises and fails the case exactly like a failed ask would,
+    because a label that never reached calibration is a gap, and a warning
+    in a log nobody reads is the same gap wearing a green checkmark.
+    """
+
+    def __init__(self, client: TypryxClient) -> None:
+        self.client = client
+        #: Set once per eval run by verdryx.cli.run_eval, right after it
+        #: generates the run's own id and before any case is graded, so
+        #: every /v1/ask this grader makes during the run carries that same
+        #: run_id and typryx's own record joins to it -- without a second
+        #: TypryxClient construction site (CLAUDE.md invariant 5, held by
+        #: check 5 of scripts/no-paid-by-default.sh) or a
+        #: change to the Grader protocol's grade(case, output) shape. None
+        #: for a TypedGrader used directly, e.g. in a test.
+        self.run_id: str | None = None
+
+    def grade(self, case: EvalCase, output: str) -> GradeResult:
+        state = {"task": case.prompt, "final_answer": output}
+        response = self.client.ask(state, self.run_id)
+
+        if response.get("unanswered"):
+            raise TypedUnanswered(
+                case.id, response.get("answer_id", ""), response.get("reason", "")
+            )
+
+        answer_type = response.get("type")
+        probabilities = response.get("probabilities") or {}
+        cost_usd = response.get("cost_usd") or 0.0
+
+        if answer_type == "noul":
+            value = float(probabilities["true"])
+        elif answer_type == "score":
+            levels = sorted(((int(k), p) for k, p in probabilities.items()), key=lambda kv: kv[0])
+            n = len(levels)
+            value = 0.0 if n < 2 else sum(i * p for i, p in levels) / (n - 1)
+        elif answer_type == "choice":
+            raise ValueError(
+                f"TypedGrader cannot score a choice template ({self.client.template!r}, "
+                f"case_id={case.id!r}): a choice has no order, so it has no score"
+            )
+        else:
+            raise ValueError(
+                f"TypedGrader: typryx returned an unrecognized answer type {answer_type!r} "
+                f"for template {self.client.template!r} (case_id={case.id!r})"
+            )
+
+        if case.expected is not None:
+            truth = _typed_truth(
+                answer_type, case.expected, case_id=case.id, template=self.client.template
+            )
+            self.client.post_outcome(response["answer_id"], truth, "verdryx:evalset")
+
+        return GradeResult(value=value, tokens=0, cost_usd=float(cost_usd))
+
+
 def build_graders(
     *,
     outcome_map: dict[str, float] | None = None,
     judge_adapter: LLMAdapter | None = None,
+    typed_client: TypryxClient | None = None,
 ) -> dict[GraderKind, Grader | ToolTraceGrader]:
     """Construct the default grader for each GraderKind.
 
@@ -484,6 +743,12 @@ def build_graders(
     needs no adapter of its own -- it scores a Completion the eval runner
     already obtained by calling LLMAdapter.complete_with_tools() itself,
     not a fresh model call ToolTraceGrader makes on its own.
+
+    typed_client works exactly like judge_adapter: GraderKind.TYPED is
+    registered only when one is given (verdryx.cli's --typed-url is the
+    only thing that constructs one: CLAUDE.md invariant 5, held by
+    checks 4 and 5 of scripts/no-paid-by-default.sh). Nothing else about the
+    defaults changes.
     """
     graders: dict[GraderKind, Grader | ToolTraceGrader] = {
         GraderKind.EXACT: ExactGrader(),
@@ -493,4 +758,6 @@ def build_graders(
     }
     if judge_adapter is not None:
         graders[GraderKind.LLM_JUDGE] = LLMJudgeGrader(judge_adapter)
+    if typed_client is not None:
+        graders[GraderKind.TYPED] = TypedGrader(typed_client)
     return graders

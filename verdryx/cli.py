@@ -4,6 +4,8 @@ Usage::
 
     verdryx eval <evalset.json> --model MODEL [--db PATH] [--events PATH]
                                  [--agent-id ID]
+                                 [--typed-url URL [--typed-key-file PATH]
+                                  [--typed-template ID]]
     verdryx baseline <run_id> [--db PATH] [--label LABEL]
     verdryx drift --baseline ID [--db PATH] [--window N] [--threshold F]
                    [--events PATH] [--agent-id ID]
@@ -20,6 +22,14 @@ structure before spending anything on it.
 <id>` needs some way to create the baseline it compares against, so this
 adds the smallest command that can produce one: snapshot an already-stored
 EvalRun's mean_score as a new Baseline.
+
+`--typed-url` is the ONLY thing that enables GraderKind.TYPED (asking
+typryx, an optional separate service, for a typed verdict): no environment
+variable enables it on its own, matching CLAUDE.md invariant 5's own logic
+applied to a second external caller. The credential comes from
+`--typed-key-file`, or else `$VERDRYX_TYPRYX_KEY_FILE` -- both a file path,
+never the key on the command line, which would show in `ps`. See
+graders.TypedGrader for what a typed case sends and gets back.
 """
 
 from __future__ import annotations
@@ -33,7 +43,7 @@ from datetime import UTC, datetime
 from typing import Any, NoReturn
 
 from verdryx import slo
-from verdryx.config import Config
+from verdryx.config import ENV_TYPRYX_KEY_FILE, Config
 from verdryx.costper import UNTAGGED, cost_per_outcome, load_records, load_run_records
 from verdryx.drift import DEFAULT_CONFIDENCE, DEFAULT_THRESHOLD, compute_drift
 from verdryx.events import EventLog, resolve_events_path
@@ -43,6 +53,10 @@ from verdryx.graders import (
     LLMAdapter,
     StubLLMAdapter,
     ToolTraceGrader,
+    TypedGrader,
+    TypedUnanswered,
+    TypryxClient,
+    TypryxError,
     build_graders,
 )
 from verdryx.models import Baseline, EvalRun, EvalSet, GraderKind, Score
@@ -82,6 +96,42 @@ def _otlp_from_config(config: Config) -> OTLPExporter | None:
     return OTLPExporter(config.otlp_endpoint) if config.otlp_endpoint else None
 
 
+def _build_typed_client(args: argparse.Namespace, config: Config) -> TypryxClient | None:
+    """`--typed-url` is the only thing that constructs a TypryxClient: no
+    environment variable enables the typed grader on its own (CLAUDE.md
+    invariant 5, checks 4 and 5 of scripts/no-paid-by-default.sh: its AST check
+    holds both this function being the one construction site and this
+    `if args.typed_url` guard). Returns None when the flag is absent, so
+    build_graders() never registers GraderKind.TYPED for an ordinary run.
+    """
+    if args.typed_url:
+        key_file = args.typed_key_file or config.typryx_key_file
+        if not key_file:
+            _die(
+                "--typed-url was given with no credential: pass --typed-key-file PATH or set "
+                f"${ENV_TYPRYX_KEY_FILE} to a file holding the typryx key. The key is never "
+                "accepted on the command line, which would show in `ps`."
+            )
+        try:
+            key = _read_key_file(key_file)
+        except OSError as e:
+            _die(f"--typed-key-file {key_file!r}: cannot read: {e}")
+        kwargs: dict[str, Any] = {}
+        if args.typed_template:
+            kwargs["template"] = args.typed_template
+        return TypryxClient(args.typed_url, key, **kwargs)
+    return None
+
+
+def _read_key_file(path: str) -> str:
+    """Read and strip a credential file. A dedicated function, not an
+    inline `.read_text().strip()`, so the one place this repo reads a
+    typryx key from disk is easy to find and audit, mirroring how
+    TypryxClient is the one place it is sent over the wire."""
+    with open(path, encoding="utf-8") as f:
+        return f.read().strip()
+
+
 # ------------------------------------------------------------------
 # Eval loop (the part that is not argparse plumbing; tested directly with
 # a StubLLMAdapter so no network call is needed to cover it)
@@ -95,6 +145,7 @@ def run_eval(
     model: str,
     agent_id: str | None = None,
     graders: dict[GraderKind, Grader | ToolTraceGrader] | None = None,
+    typed_client: TypryxClient | None = None,
 ) -> EvalRun:
     """Grade every case in `evalset` and return the resulting EvalRun.
 
@@ -122,17 +173,39 @@ def run_eval(
     score back to a fleet subject at all: the eval store and a tokenfuse trace
     share no run identity, so the subject is the only join there is. None when
     the caller did not say, and never inferred from anything else.
+
+    `typed_client` is passed straight to build_graders() when `graders` is
+    not given directly; if it is given, it is threaded through anyway,
+    setting the resulting TypedGrader's run_id to this run's own id (see
+    TypedGrader.run_id) so every /v1/ask this run makes carries it and
+    typryx's own record joins to this EvalRun. GraderKind.TYPED cases in an
+    eval set run with no typed_client die with the same "no grader
+    configured" error every other missing grader kind dies with (see
+    below), naming --typed-url as the flag that enables it.
+
+    A GraderKind.TYPED case whose grader answers unanswered raises
+    TypedUnanswered (graders.py); this function does not catch it -- see
+    that exception's own docstring for why, and verdryx.cli._cmd_eval for
+    where it is finally turned into a clean CLI death.
     """
-    graders = graders if graders is not None else build_graders(judge_adapter=adapter)
+    graders = (
+        graders
+        if graders is not None
+        else build_graders(judge_adapter=adapter, typed_client=typed_client)
+    )
     run_id = str(uuid.uuid4())
+    typed_grader = graders.get(GraderKind.TYPED)
+    if isinstance(typed_grader, TypedGrader):
+        typed_grader.run_id = run_id
     started_at = datetime.now(tz=UTC)
     scores: list[Score] = []
 
     for case in evalset.cases:
         grader = graders.get(case.grader)
         if grader is None:
+            hint = " (enable it with --typed-url)" if case.grader == GraderKind.TYPED else ""
             raise ValueError(
-                f"no grader configured for kind {case.grader.value!r} (case_id={case.id!r})"
+                f"no grader configured for kind {case.grader.value!r}{hint} (case_id={case.id!r})"
             )
         if case.grader == GraderKind.TOOL_TRACE:
             if not isinstance(grader, ToolTraceGrader):
@@ -199,7 +272,19 @@ def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
     except ValueError as e:
         _die(str(e))
     adapter = _build_adapter(args.model, config)
-    run = run_eval(evalset, adapter, model=args.model, agent_id=args.agent_id)
+    typed_client = _build_typed_client(args, config)
+    try:
+        run = run_eval(
+            evalset, adapter, model=args.model, agent_id=args.agent_id, typed_client=typed_client
+        )
+    except (TypedUnanswered, TypryxError) as e:
+        # run_eval deliberately does not catch these (see TypedUnanswered's
+        # own docstring): an unanswered verdict, a typryx refusal such as
+        # its hourly cap, and a typryx nobody could reach all leave the run
+        # unmeasured. This is where each becomes a clean CLI death instead
+        # of a raw traceback; TypryxError's message never carries the key.
+        # Nothing is saved: we die before ever reaching Store.open() below.
+        _die(str(e))
 
     db_path = args.db or config.db_path
     with Store.open(db_path) as store:
@@ -582,6 +667,31 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="ID",
         help="evaluated agent's Passport id (agent://...); required for events to be emitted",
+    )
+    p_eval.add_argument(
+        "--typed-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "typryx base URL (e.g. http://127.0.0.1:4320); the ONLY thing that enables "
+            "GraderKind.TYPED cases. typryx may run a paid backend, so this is opt-in "
+            "and never enabled by an environment variable alone"
+        ),
+    )
+    p_eval.add_argument(
+        "--typed-key-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            f"file holding the typryx credential (default: ${ENV_TYPRYX_KEY_FILE}); "
+            "never accepted on the command line, which would show in `ps`"
+        ),
+    )
+    p_eval.add_argument(
+        "--typed-template",
+        default=None,
+        metavar="ID",
+        help="typryx template id to ask (default: eval.outcome_met)",
     )
 
     p_baseline = sub.add_parser(

@@ -24,6 +24,10 @@ from verdryx.graders import (
     RegexGrader,
     StubLLMAdapter,
     ToolTraceGrader,
+    TypedGrader,
+    TypedUnanswered,
+    TypryxClient,
+    TypryxError,
     build_graders,
 )
 from verdryx.models import DEFAULT_OUTCOME_SCORES, Completion, EvalCase, GraderKind
@@ -864,3 +868,412 @@ def test_build_graders_outcome_map_override_applies_to_the_built_grader() -> Non
     case = EvalCase(id="c1", prompt="x", grader=GraderKind.OUTCOME_TAG)
     assert grader.grade(case, "solved").value == 1.0
     assert grader.grade(case, "case_resolved").value == 0.0
+
+
+# ------------------------------------------------------------------
+# TypryxClient / TypedGrader -- against a real loopback HTTP server
+# (tests/conftest.py's `typryx_fake` fixture), no mocking of urllib.
+# ------------------------------------------------------------------
+
+
+def _noul_answer(
+    *, answer_id: str = "ans-1", p_true: float = 0.8, cost_usd: float = 0.0
+) -> dict[str, object]:
+    return {
+        "answer_id": answer_id,
+        "template": "eval.outcome_met",
+        "template_version": "v1",
+        "type": "noul",
+        "answer": p_true,
+        "probabilities": {"true": p_true, "false": 1 - p_true},
+        "backend": "stub",
+        "model": "stub-0",
+        "latency_ms": 3,
+        "held_back_fields": 0,
+        "cost_usd": cost_usd,
+    }
+
+
+def _score_answer(
+    *, answer_id: str = "ans-2", probabilities: dict[str, float]
+) -> dict[str, object]:
+    return {
+        "answer_id": answer_id,
+        "template": "eval.answer_quality",
+        "template_version": "v1",
+        "type": "score",
+        "answer": max(probabilities, key=lambda k: probabilities[k]),
+        "probabilities": probabilities,
+        "backend": "stub",
+        "model": "stub-0",
+        "latency_ms": 3,
+        "held_back_fields": 0,
+    }
+
+
+def _choice_answer(*, answer_id: str = "ans-3") -> dict[str, object]:
+    return {
+        "answer_id": answer_id,
+        "template": "request.complexity",
+        "template_version": "v1",
+        "type": "choice",
+        "answer": "default",
+        "probabilities": {"cheap": 0.1, "default": 0.7, "hard": 0.15, "reasoning": 0.05},
+        "backend": "stub",
+        "model": "stub-0",
+        "latency_ms": 3,
+        "held_back_fields": 0,
+    }
+
+
+def _unanswered(*, answer_id: str = "ans-4", reason: str = "timeout") -> dict[str, object]:
+    return {
+        "answer_id": answer_id,
+        "template": "eval.outcome_met",
+        "template_version": "v1",
+        "type": "noul",
+        "unanswered": True,
+        "reason": reason,
+        "held_back_fields": 0,
+    }
+
+
+def _typed_case(case_id: str = "typed-1", expected: str | None = None) -> EvalCase:
+    return EvalCase(
+        id=case_id,
+        prompt="did the agent finish the task?",
+        grader=GraderKind.TYPED,
+        expected=expected,
+    )
+
+
+# --- Scenario: Nobody gets the typed grader without asking for it ----------
+
+
+def test_build_graders_no_typed_client_means_no_typed_grader() -> None:
+    graders = build_graders()
+    assert GraderKind.TYPED not in graders
+
+
+def test_build_graders_registers_typed_grader_when_client_given(typryx_fake) -> None:
+    client = TypryxClient(typryx_fake.url, "k1")
+    graders = build_graders(typed_client=client)
+    assert GraderKind.TYPED in graders
+    assert isinstance(graders[GraderKind.TYPED], TypedGrader)
+
+
+# --- Scenario: A typed verdict is the probability typryx gave --------------
+
+
+def test_typed_grader_noul_value_is_the_probability_typryx_gave(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer(p_true=0.8))
+    client = TypryxClient(typryx_fake.url, "k1")
+    grader = TypedGrader(client)
+    case = _typed_case()
+    result = grader.grade(case, "the agent resolved the ticket")
+    assert result.value == pytest.approx(0.8)
+    assert result.tokens == 0
+
+
+def test_typed_grader_cost_usd_comes_from_typryx(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer(cost_usd=0.0042))
+    client = TypryxClient(typryx_fake.url, "k1")
+    result = TypedGrader(client).grade(_typed_case(), "output")
+    assert result.cost_usd == pytest.approx(0.0042)
+
+
+def test_typed_grader_cost_usd_defaults_to_zero_when_absent(typryx_fake) -> None:
+    answer = _noul_answer()
+    del answer["cost_usd"]
+    typryx_fake.script("/v1/ask", 200, answer)
+    client = TypryxClient(typryx_fake.url, "k1")
+    result = TypedGrader(client).grade(_typed_case(), "output")
+    assert result.cost_usd == 0.0
+
+
+# --- Scenario: Only the task and the answer leave verdryx -------------------
+
+
+def test_typed_grader_sends_only_task_and_final_answer(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer())
+    client = TypryxClient(typryx_fake.url, "k1", template="eval.outcome_met")
+    case = EvalCase(
+        id="c1", prompt="summarise the ticket", grader=GraderKind.TYPED, rubric="be nice"
+    )
+    TypedGrader(client).grade(case, "the ticket was resolved")
+
+    [request] = typryx_fake.requests
+    assert request["path"] == "/v1/ask"
+    assert request["body"] == {
+        "template": "eval.outcome_met",
+        "state": {"task": "summarise the ticket", "final_answer": "the ticket was resolved"},
+    }
+
+
+def test_typryx_client_ask_includes_run_id_when_given(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer())
+    client = TypryxClient(typryx_fake.url, "k1")
+    client.ask({"task": "t", "final_answer": "a"}, "run-123")
+    [request] = typryx_fake.requests
+    assert request["body"]["run_id"] == "run-123"
+
+
+def test_typryx_client_ask_omits_run_id_when_none(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer())
+    client = TypryxClient(typryx_fake.url, "k1")
+    client.ask({"task": "t", "final_answer": "a"}, None)
+    [request] = typryx_fake.requests
+    assert "run_id" not in request["body"]
+
+
+def test_typryx_client_sends_the_key_header(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer())
+    client = TypryxClient(typryx_fake.url, "super-secret-key")
+    client.ask({"task": "t", "final_answer": "a"}, None)
+    [request] = typryx_fake.requests
+    assert request["key"] == "super-secret-key"
+
+
+# --- Score normalisation: 4 levels, probabilities summing to 1 -------------
+
+
+def test_typed_grader_score_normalises_to_zero_one_range(typryx_fake) -> None:
+    # 4 levels ("0".."3"), all mass on the top level: normalised score is 1.0.
+    typryx_fake.script(
+        "/v1/ask", 200, _score_answer(probabilities={"0": 0.0, "1": 0.0, "2": 0.0, "3": 1.0})
+    )
+    client = TypryxClient(typryx_fake.url, "k1", template="eval.answer_quality")
+    result = TypedGrader(client).grade(_typed_case(), "a great answer")
+    assert result.value == pytest.approx(1.0)
+
+
+def test_typed_grader_score_normalises_bottom_level_to_zero(typryx_fake) -> None:
+    typryx_fake.script(
+        "/v1/ask", 200, _score_answer(probabilities={"0": 1.0, "1": 0.0, "2": 0.0, "3": 0.0})
+    )
+    client = TypryxClient(typryx_fake.url, "k1", template="eval.answer_quality")
+    result = TypedGrader(client).grade(_typed_case(), "a bad answer")
+    assert result.value == pytest.approx(0.0)
+
+
+def test_typed_grader_score_weighted_mean_matches_the_documented_formula(typryx_fake) -> None:
+    probs = {"0": 0.1, "1": 0.2, "2": 0.3, "3": 0.4}
+    assert sum(probs.values()) == pytest.approx(1.0)
+    typryx_fake.script("/v1/ask", 200, _score_answer(probabilities=probs))
+    client = TypryxClient(typryx_fake.url, "k1", template="eval.answer_quality")
+    result = TypedGrader(client).grade(_typed_case(), "a middling answer")
+    # sum(i * p_i) / (n - 1) = (0*.1 + 1*.2 + 2*.3 + 3*.4) / 3 = 2.0 / 3
+    assert result.value == pytest.approx(2.0 / 3)
+
+
+# --- Choice is refused, not scored ------------------------------------------
+
+
+def test_typed_grader_choice_template_is_refused(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _choice_answer())
+    client = TypryxClient(typryx_fake.url, "k1", template="request.complexity")
+    with pytest.raises(ValueError, match="no order"):
+        TypedGrader(client).grade(_typed_case(), "output")
+
+
+# --- Scenario: An unanswered verdict is not a zero --------------------------
+
+
+def test_typed_grader_unanswered_raises_typed_unanswered(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _unanswered(answer_id="ans-9", reason="timeout"))
+    client = TypryxClient(typryx_fake.url, "k1")
+    case = _typed_case(case_id="budget-case")
+    with pytest.raises(TypedUnanswered) as exc_info:
+        TypedGrader(client).grade(case, "output")
+    assert exc_info.value.case_id == "budget-case"
+    assert exc_info.value.answer_id == "ans-9"
+    assert exc_info.value.reason == "timeout"
+    assert "budget-case" in str(exc_info.value)
+    assert "timeout" in str(exc_info.value)
+
+
+def test_typed_grader_unanswered_never_posts_an_outcome_even_with_expected(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _unanswered())
+    client = TypryxClient(typryx_fake.url, "k1")
+    case = _typed_case(expected="true")
+    with pytest.raises(TypedUnanswered):
+        TypedGrader(client).grade(case, "output")
+    assert [r["path"] for r in typryx_fake.requests] == ["/v1/ask"]
+
+
+# --- Scenario: A human label reaches typryx calibration ---------------------
+
+
+def test_typed_grader_posts_noul_human_label_as_outcome(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer(answer_id="ans-label"))
+    typryx_fake.script(
+        "/v1/outcome",
+        200,
+        {"answer_id": "ans-label", "template": "eval.outcome_met", "template_version": "v1"},
+    )
+    client = TypryxClient(typryx_fake.url, "k1")
+    case = _typed_case(expected="true")
+    TypedGrader(client).grade(case, "output")
+
+    outcome_requests = [r for r in typryx_fake.requests if r["path"] == "/v1/outcome"]
+    assert len(outcome_requests) == 1
+    assert outcome_requests[0]["body"] == {
+        "answer_id": "ans-label",
+        "truth": True,
+        "source": "verdryx:evalset",
+    }
+
+
+def test_typed_grader_noul_label_is_case_insensitive(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer(answer_id="ans-x"))
+    typryx_fake.script("/v1/outcome", 200, {"answer_id": "ans-x"})
+    client = TypryxClient(typryx_fake.url, "k1")
+    TypedGrader(client).grade(_typed_case(expected="FALSE"), "output")
+    [outcome] = [r for r in typryx_fake.requests if r["path"] == "/v1/outcome"]
+    assert outcome["body"]["truth"] is False
+
+
+def test_typed_grader_posts_score_human_label_as_integer(typryx_fake) -> None:
+    typryx_fake.script(
+        "/v1/ask",
+        200,
+        _score_answer(
+            answer_id="ans-score", probabilities={"0": 0.1, "1": 0.2, "2": 0.3, "3": 0.4}
+        ),
+    )
+    typryx_fake.script("/v1/outcome", 200, {"answer_id": "ans-score"})
+    client = TypryxClient(typryx_fake.url, "k1", template="eval.answer_quality")
+    TypedGrader(client).grade(_typed_case(expected="2"), "output")
+    [outcome] = [r for r in typryx_fake.requests if r["path"] == "/v1/outcome"]
+    assert outcome["body"] == {"answer_id": "ans-score", "truth": 2, "source": "verdryx:evalset"}
+
+
+def test_typed_grader_with_no_expected_posts_no_outcome(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer())
+    client = TypryxClient(typryx_fake.url, "k1")
+    TypedGrader(client).grade(_typed_case(expected=None), "output")
+    assert [r["path"] for r in typryx_fake.requests] == ["/v1/ask"]
+
+
+def test_typed_grader_failed_outcome_post_fails_the_case(typryx_fake) -> None:
+    """A failed outcome post is not swallowed into a log line: it raises and
+    fails the case exactly like a failed ask would."""
+    typryx_fake.script("/v1/ask", 200, _noul_answer(answer_id="ans-fail"))
+    typryx_fake.script("/v1/outcome", 409, {"error": "outcome_exists"})
+    client = TypryxClient(typryx_fake.url, "k1")
+    with pytest.raises(TypryxError) as exc_info:
+        TypedGrader(client).grade(_typed_case(expected="true"), "output")
+    assert exc_info.value.status == 409
+    assert exc_info.value.code == "outcome_exists"
+
+
+# --- Scenario: A label that does not fit the question is never sent --------
+
+
+def test_typed_grader_label_that_does_not_fit_noul_is_never_posted(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 200, _noul_answer(answer_id="ans-bad-label"))
+    client = TypryxClient(typryx_fake.url, "k1")
+    case = _typed_case(expected="maybe")
+    with pytest.raises(ValueError, match="not a yes or a no"):
+        TypedGrader(client).grade(case, "output")
+    # Nothing posted: the ask happened, the outcome never did.
+    assert [r["path"] for r in typryx_fake.requests] == ["/v1/ask"]
+
+
+def test_typed_grader_label_that_does_not_fit_score_is_never_posted(typryx_fake) -> None:
+    typryx_fake.script(
+        "/v1/ask",
+        200,
+        _score_answer(
+            answer_id="ans-bad-score", probabilities={"0": 0.25, "1": 0.25, "2": 0.25, "3": 0.25}
+        ),
+    )
+    client = TypryxClient(typryx_fake.url, "k1", template="eval.answer_quality")
+    case = _typed_case(expected="excellent")
+    with pytest.raises(ValueError, match="not a decimal integer"):
+        TypedGrader(client).grade(case, "output")
+    assert [r["path"] for r in typryx_fake.requests] == ["/v1/ask"]
+
+
+# --- Scenario: The key never appears on a command line or in an error ------
+
+
+def test_typryx_error_names_status_and_code_not_the_key(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 401, {"error": "unauthorized"})
+    client = TypryxClient(typryx_fake.url, "a-very-secret-key")
+    with pytest.raises(TypryxError) as exc_info:
+        client.ask({"task": "t", "final_answer": "a"}, None)
+    assert exc_info.value.status == 401
+    assert exc_info.value.code == "unauthorized"
+    assert "a-very-secret-key" not in str(exc_info.value)
+
+
+def test_typryx_client_repr_never_includes_the_key() -> None:
+    client = TypryxClient("http://127.0.0.1:4320", "a-very-secret-key")
+    assert "a-very-secret-key" not in repr(client)
+    assert "a-very-secret-key" not in str(client)
+
+
+def test_typryx_error_hourly_cap_surfaced_with_status_and_code(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 429, {"error": "over_hourly_cap"})
+    client = TypryxClient(typryx_fake.url, "k1")
+    with pytest.raises(TypryxError) as exc_info:
+        client.ask({"task": "t", "final_answer": "a"}, None)
+    assert exc_info.value.status == 429
+    assert exc_info.value.code == "over_hourly_cap"
+
+
+def test_typryx_error_unknown_template_surfaced_with_status_and_code(typryx_fake) -> None:
+    typryx_fake.script("/v1/ask", 400, {"error": "unknown_template"})
+    client = TypryxClient(typryx_fake.url, "k1")
+    with pytest.raises(TypryxError) as exc_info:
+        client.ask({"task": "t", "final_answer": "a"}, None)
+    assert exc_info.value.status == 400
+    assert exc_info.value.code == "unknown_template"
+
+
+def test_typryx_client_connection_refused_raises_typryx_error_naming_the_url() -> None:
+    # Nothing listening on this port -- a real connection failure, not a
+    # mocked one.
+    client = TypryxClient("http://127.0.0.1:1", "k1", timeout=2.0)
+    with pytest.raises(TypryxError) as exc_info:
+        client.ask({"task": "t", "final_answer": "a"}, None)
+    assert exc_info.value.status is None
+    assert "127.0.0.1:1" in str(exc_info.value)
+
+
+def test_typed_grader_satisfies_grader_protocol() -> None:
+    client = TypryxClient("http://127.0.0.1:4320", "k1")
+    assert isinstance(TypedGrader(client), Grader)
+
+
+def test_typed_grader_unrecognized_answer_type_raises_value_error(typryx_fake) -> None:
+    answer = _noul_answer()
+    answer["type"] = "something-typryx-never-documented"
+    typryx_fake.script("/v1/ask", 200, answer)
+    client = TypryxClient(typryx_fake.url, "k1")
+    with pytest.raises(ValueError, match="unrecognized answer type"):
+        TypedGrader(client).grade(_typed_case(), "output")
+
+
+def test_typryx_error_survives_a_non_json_error_body(typryx_fake) -> None:
+    """A refusal whose body is not valid JSON at all (not just a differently
+    shaped dict) still becomes a TypryxError naming the status, with code
+    None rather than raising a JSONDecodeError of its own."""
+    typryx_fake.script_raw("/v1/ask", 500, b"<html>internal error</html>")
+    client = TypryxClient(typryx_fake.url, "k1")
+    with pytest.raises(TypryxError) as exc_info:
+        client.ask({"task": "t", "final_answer": "a"}, None)
+    assert exc_info.value.status == 500
+    assert exc_info.value.code is None
+
+
+def test_typed_truth_rejects_a_template_type_that_is_neither_noul_nor_score() -> None:
+    """_typed_truth's own fallback, unreachable through TypedGrader.grade
+    (which already refuses a choice template before computing a value, so
+    it never calls this with anything but "noul"/"score") but part of the
+    documented contract: anything else raises ValueError naming the case."""
+    from verdryx.graders import _typed_truth
+
+    with pytest.raises(ValueError, match="cannot be posted"):
+        _typed_truth("choice", "default", case_id="c1", template="request.complexity")

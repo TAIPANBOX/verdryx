@@ -6,7 +6,7 @@
 # exception. Nothing crashes, no test goes red, and the first sign is an invoice
 # for a run somebody thought was free.
 #
-# It holds three ways today, and this checks all three, because losing any one
+# It holds five ways today, and this checks all five, because losing any one
 # of them is enough:
 #
 #   1. `verdryx eval --model` is REQUIRED and has no default. There is no
@@ -17,10 +17,16 @@
 #   3. `AnthropicAdapter`, the only thing here that makes a priced outbound
 #      call, is constructed in exactly one place, behind an explicit
 #      `model != "stub"` branch.
+#   4. `build_graders()` with no typed_client registers no TYPED grader at
+#      all. typryx is a separate, optional service that may run a paid
+#      backend; the caller must name it on purpose (--typed-url).
+#   5. `TypryxClient`, the only thing here that talks to typryx, is
+#      constructed in exactly one place in verdryx/, behind an `if` whose
+#      test mentions `typed_url`.
 #
-# Checks 1 and 3 read the source; check 2 imports the package and asks it. That
-# split is deliberate: a structural claim is checked structurally, and a
-# behavioural one by running it.
+# Checks 1, 3 and 5 read the source; checks 2 and 4 import the package and ask
+# it. That split is deliberate: a structural claim is checked structurally,
+# and a behavioural one by running it.
 #
 # The import needs verdryx's single runtime dependency, so the script builds a
 # throwaway venv for it rather than assuming one is set up. A gate that only
@@ -103,7 +109,51 @@ if len(anthropic_sites) != 1:
         f"branch, so the priced path stays easy to find and audit."
     )
 
-# ---------------------------------------------------------------------- 2
+# ---------------------------------------------------------------------- 5
+# TypryxClient's one construction site, anywhere in verdryx/, must sit
+# lexically inside an `if` whose test mentions `typed_url` -- the same
+# "explicit opt-in branch" shape check 3 does for AnthropicAdapter, but
+# walked generically across the package rather than one file, since nothing
+# says the caller must live in cli.py.
+typryx_sites = []
+
+
+class _TypryxClientFinder(ast.NodeVisitor):
+    def __init__(self, path):
+        self.path = path
+        self.if_stack = []
+
+    def visit_If(self, node):
+        self.if_stack.append(node)
+        self.generic_visit(node)
+        self.if_stack.pop()
+
+    def visit_Call(self, node):
+        if getattr(node.func, "id", None) == "TypryxClient":
+            enclosing = self.if_stack[-1] if self.if_stack else None
+            guarded = enclosing is not None and "typed_url" in ast.dump(enclosing.test)
+            typryx_sites.append((f"{self.path}:{node.lineno}", guarded))
+        self.generic_visit(node)
+
+
+for py_file in sorted(pathlib.Path("verdryx").rglob("*.py")):
+    _TypryxClientFinder(py_file).visit(ast.parse(py_file.read_text(), filename=str(py_file)))
+
+if len(typryx_sites) != 1:
+    problems.append(
+        f"TypryxClient is constructed in {len(typryx_sites)} place(s) in verdryx/ "
+        f"(sites: {[s for s, _ in typryx_sites] or 'none'}). It is meant to have "
+        f"exactly one construction site, so the path to typryx (an optional "
+        f"service that may run a paid backend) stays easy to find and audit."
+    )
+elif not typryx_sites[0][1]:
+    problems.append(
+        f"TypryxClient's one construction site ({typryx_sites[0][0]}) is not "
+        f"inside an `if` whose test mentions `typed_url`. --typed-url is meant "
+        f"to be the only thing that enables it."
+    )
+
+# ------------------------------------------------------------------- 2 and 4
 try:
     sys.path.insert(0, ".")
     from verdryx.graders import build_graders
@@ -115,6 +165,12 @@ try:
             "build_graders() with no judge_adapter registered an LLM_JUDGE "
             "grader. The priced grader must be absent unless a caller supplies "
             "an adapter on purpose."
+        )
+    if GraderKind.TYPED in default_set:
+        problems.append(
+            "build_graders() with no typed_client registered a TYPED grader. "
+            "typryx is an optional service that may run a paid backend, and "
+            "the caller must name it on purpose (--typed-url)."
         )
     if not default_set:
         problems.append(
@@ -135,5 +191,6 @@ if problems:
 
 kinds = sorted(k.name for k in default_set)
 print(f"OK: the default grader set is {kinds} and carries no priced judge;")
-print("    --model is required with no default; one AnthropicAdapter site.")
+print("    --model is required with no default; one AnthropicAdapter site;")
+print("    one TypryxClient site, guarded by an if testing typed_url.")
 PY
