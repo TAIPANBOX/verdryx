@@ -14,7 +14,7 @@
 
 </div>
 
-Line coverage of the `verdryx` package: **97%** (`1475/1521` statements).
+Line coverage of the `verdryx` package: **97%** (`1510/1556` statements).
 `@measured .venv/bin/pytest --cov=verdryx --cov-report=term-missing 2026-09-25`.
 Unlike the tests badge above, this figure is not gated (see CLAUDE.md invariant
 11): recomputing it inside a gate would mean running the full suite inside a
