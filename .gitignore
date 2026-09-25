@@ -69,3 +69,7 @@ verdryx-events.ndjson
 
 # Claude Code local state
 .claude/
+
+# Bake-off harness output (examples/bakeoff/bakeoff.sh): generated per run,
+# never checked in.
+examples/bakeoff/results/
