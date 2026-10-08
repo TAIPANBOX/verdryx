@@ -106,21 +106,77 @@ def test_price_book_unknown_model_with_fallback_resolves_via_fallback() -> None:
 # ------------------------------------------------------------------
 
 #: (model, input_per_mtok, output_per_mtok, cache_read_per_mtok,
-#: cache_write_per_mtok), copied verbatim from tokenfuse's
-#: crates/gateway/src/pricebook.rs `default_price_book()`.
+#: cache_write_per_mtok), every row of tokenfuse's published price book,
+#: `contracts/tokenfuse-constants.json` `price_book.models` at tokenfuse
+#: commit ead13bc (main, 2026-10-07), in the artifact's own order (sorted by
+#: model id). Converted from integer micro-USD per Mtok to USD per Mtok.
+#: estate-gates' C3 compares the same four rates against the same artifact;
+#: this list is the copy a verdryx test run can see without that repository.
 _EXPECTED_DEFAULT_ENTRIES = [
-    ("claude-sonnet", 3.0, 15.0, 0.30, 3.75),
-    ("claude-haiku", 0.80, 4.0, 0.08, 1.0),
-    ("gpt", 2.5, 10.0, 0.25, 3.125),
+    ("anthropic.claude-fable-5", 11.00, 55.00, 1.10, 13.75),
+    ("anthropic.claude-fable-5-1", 11.00, 55.00, 0.275, 13.75),
+    ("anthropic.claude-haiku-4-5", 1.10, 5.50, 0.11, 1.375),
+    ("anthropic.claude-haiku-4-5-20251001-v1:0", 1.10, 5.50, 0.11, 1.375),
+    ("anthropic.claude-opus-4-5-20251101-v1:0", 5.50, 27.50, 0.55, 6.875),
+    ("anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
+    ("anthropic.claude-opus-4-7", 5.50, 27.50, 0.55, 6.875),
+    ("anthropic.claude-opus-4-8", 5.50, 27.50, 0.55, 6.875),
+    ("anthropic.claude-opus-5", 5.50, 27.50, 0.55, 6.875),
+    ("anthropic.claude-opus-5-5", 4.40, 22.00, 0.22, 5.50),
+    ("anthropic.claude-sonnet-4-5-20250929-v1:0", 3.30, 16.50, 0.33, 4.125),
+    ("anthropic.claude-sonnet-4-6", 3.30, 16.50, 0.33, 4.125),
+    ("anthropic.claude-sonnet-5", 2.20, 11.00, 0.22, 2.75),
+    ("anthropic.claude-sonnet-5-5", 2.20, 11.00, 0.22, 2.75),
+    ("anthropic/claude-opus-4.8", 5.00, 25.00, 0.50, 6.25),
+    ("anthropic/claude-opus-5", 5.00, 25.00, 0.50, 6.25),
+    ("anthropic/claude-opus-5.5", 4.00, 20.00, 0.20, 5.00),
+    ("anthropic/claude-sonnet-4.6", 3.00, 15.00, 0.30, 3.75),
+    ("anthropic/claude-sonnet-5", 2.00, 10.00, 0.20, 2.50),
+    ("anthropic/claude-sonnet-5.5", 2.00, 10.00, 0.20, 2.50),
+    ("apac.anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
+    ("claude-fable-5", 10.00, 50.00, 1.00, 12.50),
+    ("claude-fable-5-1", 10.00, 50.00, 0.25, 12.50),
+    ("claude-haiku", 0.80, 4.00, 0.08, 1.00),
     ("claude-haiku-4-5", 1.00, 5.00, 0.10, 1.25),
     ("claude-haiku-4-5-20251001", 1.00, 5.00, 0.10, 1.25),
-    ("claude-sonnet-4-5", 3.00, 15.00, 0.30, 3.75),
-    ("claude-sonnet-4-5-20250929", 3.00, 15.00, 0.30, 3.75),
+    ("claude-haiku-4-5@20251001", 1.10, 5.50, 0.11, 1.375),
     ("claude-opus-4-5", 5.00, 25.00, 0.50, 6.25),
     ("claude-opus-4-5-20251101", 5.00, 25.00, 0.50, 6.25),
+    ("claude-opus-4-5@20251101", 5.50, 27.50, 0.55, 6.875),
+    ("claude-opus-4-6", 5.00, 25.00, 0.50, 6.25),
+    ("claude-opus-4-7", 5.00, 25.00, 0.50, 6.25),
+    ("claude-opus-4-8", 5.00, 25.00, 0.50, 6.25),
+    ("claude-opus-5", 5.00, 25.00, 0.50, 6.25),
+    ("claude-opus-5-5", 4.00, 20.00, 0.20, 5.00),
+    ("claude-sonnet", 3.00, 15.00, 0.30, 3.75),
+    ("claude-sonnet-4-5", 3.00, 15.00, 0.30, 3.75),
+    ("claude-sonnet-4-5-20250929", 3.00, 15.00, 0.30, 3.75),
+    ("claude-sonnet-4-5@20250929", 3.30, 16.50, 0.33, 4.125),
+    ("claude-sonnet-4-6", 3.00, 15.00, 0.30, 3.75),
+    ("claude-sonnet-5", 2.00, 10.00, 0.20, 2.50),
+    ("claude-sonnet-5-5", 2.00, 10.00, 0.20, 2.50),
+    ("eu.anthropic.claude-haiku-4-5-20251001-v1:0", 1.10, 5.50, 0.11, 1.375),
+    ("eu.anthropic.claude-opus-4-5-20251101-v1:0", 5.50, 27.50, 0.55, 6.875),
+    ("eu.anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
+    ("eu.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.30, 16.50, 0.33, 4.125),
+    ("eu.anthropic.claude-sonnet-4-6", 3.30, 16.50, 0.33, 4.125),
+    ("global.anthropic.claude-haiku-4-5-20251001-v1:0", 1.00, 5.00, 0.10, 1.25),
+    ("global.anthropic.claude-opus-4-5-20251101-v1:0", 5.00, 25.00, 0.50, 6.25),
+    ("global.anthropic.claude-opus-4-6-v1", 5.00, 25.00, 0.50, 6.25),
+    ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.00, 15.00, 0.30, 3.75),
+    ("global.anthropic.claude-sonnet-4-6", 3.00, 15.00, 0.30, 3.75),
+    ("gpt", 2.50, 10.00, 0.25, 3.125),
     ("gpt-4o", 2.50, 10.00, 1.25, 2.50),
     ("gpt-4o-mini", 0.15, 0.60, 0.075, 0.15),
+    ("jp.anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
+    ("jp.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.30, 16.50, 0.33, 4.125),
+    ("jp.anthropic.claude-sonnet-4-6", 3.30, 16.50, 0.33, 4.125),
     ("o1", 15.00, 60.00, 7.50, 15.00),
+    ("us.anthropic.claude-haiku-4-5-20251001-v1:0", 1.10, 5.50, 0.11, 1.375),
+    ("us.anthropic.claude-opus-4-5-20251101-v1:0", 5.50, 27.50, 0.55, 6.875),
+    ("us.anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
+    ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.30, 16.50, 0.33, 4.125),
+    ("us.anthropic.claude-sonnet-4-6", 3.30, 16.50, 0.33, 4.125),
 ]
 
 
@@ -132,6 +188,72 @@ def test_price_book_default_entry_matches_tokenfuse_pricebook(
 ) -> None:
     entry = PriceBook.default().lookup(model)
     assert entry == ModelPrice(input_p, output_p, cache_read_p, cache_write_p)
+
+
+def test_price_book_default_holds_exactly_the_pinned_models() -> None:
+    """No row beyond the pinned list and none missing from it. The
+    parametrised test above proves each pinned row is present and right; it
+    cannot see a row verdryx holds that tokenfuse does not, which prices a
+    model here that tokenfuse charges at the fallback rate."""
+    book = PriceBook.default()
+    assert set(book._prices) == {row[0] for row in _EXPECTED_DEFAULT_ENTRIES}
+
+
+#: (id whose endpoint may be regional, the list-rate id of the same model).
+#: Tokenfuse prices the first at list plus 10 percent (its `regional()`
+#: helper in crates/gateway/src/pricebook.rs); a typo in one hand-written
+#: rate shows here as a ratio that is not 1.1.
+_REGIONAL_PAIRS = [
+    ("anthropic.claude-fable-5-1", "claude-fable-5-1"),
+    ("anthropic.claude-fable-5", "claude-fable-5"),
+    ("anthropic.claude-opus-5-5", "claude-opus-5-5"),
+    ("anthropic.claude-opus-5", "claude-opus-5"),
+    ("anthropic.claude-opus-4-8", "claude-opus-4-8"),
+    ("anthropic.claude-opus-4-7", "claude-opus-4-7"),
+    ("anthropic.claude-opus-4-6-v1", "claude-opus-4-6"),
+    ("us.anthropic.claude-opus-4-6-v1", "claude-opus-4-6"),
+    ("eu.anthropic.claude-opus-4-6-v1", "claude-opus-4-6"),
+    ("jp.anthropic.claude-opus-4-6-v1", "claude-opus-4-6"),
+    ("apac.anthropic.claude-opus-4-6-v1", "claude-opus-4-6"),
+    ("claude-opus-4-5@20251101", "claude-opus-4-5"),
+    ("anthropic.claude-opus-4-5-20251101-v1:0", "claude-opus-4-5"),
+    ("us.anthropic.claude-opus-4-5-20251101-v1:0", "claude-opus-4-5"),
+    ("eu.anthropic.claude-opus-4-5-20251101-v1:0", "claude-opus-4-5"),
+    ("anthropic.claude-sonnet-5-5", "claude-sonnet-5-5"),
+    ("anthropic.claude-sonnet-5", "claude-sonnet-5"),
+    ("anthropic.claude-sonnet-4-6", "claude-sonnet-4-6"),
+    ("us.anthropic.claude-sonnet-4-6", "claude-sonnet-4-6"),
+    ("eu.anthropic.claude-sonnet-4-6", "claude-sonnet-4-6"),
+    ("jp.anthropic.claude-sonnet-4-6", "claude-sonnet-4-6"),
+    ("claude-sonnet-4-5@20250929", "claude-sonnet-4-5"),
+    ("anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5"),
+    ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5"),
+    ("eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5"),
+    ("jp.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5"),
+    ("claude-haiku-4-5@20251001", "claude-haiku-4-5"),
+    ("anthropic.claude-haiku-4-5", "claude-haiku-4-5"),
+    ("anthropic.claude-haiku-4-5-20251001-v1:0", "claude-haiku-4-5"),
+    ("us.anthropic.claude-haiku-4-5-20251001-v1:0", "claude-haiku-4-5"),
+    ("eu.anthropic.claude-haiku-4-5-20251001-v1:0", "claude-haiku-4-5"),
+]
+
+
+@pytest.mark.parametrize("regional_id,list_id", _REGIONAL_PAIRS)
+def test_price_book_default_regional_id_is_list_plus_ten_percent(
+    regional_id: str, list_id: str
+) -> None:
+    book = PriceBook.default()
+    assert book.is_known(regional_id), f"{regional_id} should be an exact entry"
+    assert book.is_known(list_id), f"{list_id} should be an exact entry"
+    regional = book.lookup(regional_id)
+    listed = book.lookup(list_id)
+    for got, base in [
+        (regional.input_per_mtok_usd, listed.input_per_mtok_usd),
+        (regional.output_per_mtok_usd, listed.output_per_mtok_usd),
+        (regional.cache_read_per_mtok_usd, listed.cache_read_per_mtok_usd),
+        (regional.cache_write_per_mtok_usd, listed.cache_write_per_mtok_usd),
+    ]:
+        assert got == pytest.approx(base * 1.1)
 
 
 def test_price_book_default_new_2026_models_resolve_by_exact_match_not_fallback() -> None:
@@ -189,6 +311,17 @@ def test_price_book_default_fallback_stays_at_least_as_expensive_as_opus() -> No
         "truly-unknown-model", input_tokens=1_000_000, output_tokens=1_000_000
     )
     assert fallback_cost >= opus_cost
+    # Opus 4.5 stopped being the dearest row: a regional Claude Fable id is
+    # 11 / 55. Every row, so a dearer model added later fails here rather
+    # than being under-priced by the fallback. Input and output only, which
+    # is the claim tokenfuse's own price book makes ("nothing in the book is
+    # dearer in input or output"): o1's cached input, 7.50, is above the
+    # fallback's cache read, 1.50, in tokenfuse's book and so in this one.
+    fallback = book.lookup("truly-unknown-model")
+    for model, *_ in _EXPECTED_DEFAULT_ENTRIES:
+        entry = book.lookup(model)
+        assert fallback.input_per_mtok_usd >= entry.input_per_mtok_usd, model
+        assert fallback.output_per_mtok_usd >= entry.output_per_mtok_usd, model
 
 
 def test_price_book_default_fallback_never_raises_for_unknown_model() -> None:
