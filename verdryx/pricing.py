@@ -124,11 +124,13 @@ class PriceBook:
 
         Ported number-for-number from tokenfuse's published price book,
         `contracts/tokenfuse-constants.json` (`price_book.models`), at
-        tokenfuse commit ead13bc (main, 2026-10-07), which is generated from
+        tokenfuse commit 31f7b43 (main, 2026-10-08), which is generated from
         `crates/gateway/src/pricebook.rs` `default_price_book()`. Anthropic
-        rates as tokenfuse read them on 2026-10-07; OpenAI rates as of
+        rates as tokenfuse read them on 2026-10-07; Google's Gemini rates
+        on Vertex AI as it read them on 2026-10-08; OpenAI rates as of
         2026-07. Verify against
-        https://platform.claude.com/docs/en/about-claude/pricing and
+        https://platform.claude.com/docs/en/about-claude/pricing,
+        https://cloud.google.com/vertex-ai/generative-ai/pricing and
         https://developers.openai.com/api/docs/pricing before relying on
         them for anything beyond a rough estimate, same disclaimer
         tokenfuse's own price book carries.
@@ -291,6 +293,28 @@ class PriceBook:
             .with_price(
                 "eu.anthropic.claude-haiku-4-5-20251001-v1:0", ModelPrice(1.10, 5.50, 0.11, 1.375)
             )
+            #
+            # Google: Gemini on Vertex AI, by the id Vertex AI's
+            # OpenAI-compatible endpoint takes (`google/<model id>`), as
+            # tokenfuse prices it (its `GEMINI` table, invariant 82). Rates
+            # read by tokenfuse from
+            # https://cloud.google.com/vertex-ai/generative-ai/pricing on
+            # 2026-10-08. No cache-write fee, so cache_write is the input
+            # rate. Each choice the page leaves open is taken on the
+            # over-charging side: the Gemini 3 family at its non-global
+            # rate (the id does not name the endpoint), Gemini 2.5 Pro at
+            # its rate above 200K input tokens, Gemini 3.6, 3.7 and 3.8
+            # Flash at the standard rate, not the introductory credit.
+            .with_price("google/gemini-3.8-flash", ModelPrice(1.65, 8.25, 0.165, 1.65))
+            .with_price("google/gemini-3.8-flash-cyber", ModelPrice(1.65, 8.25, 0.165, 1.65))
+            .with_price("google/gemini-3.7-flash", ModelPrice(1.65, 8.25, 0.165, 1.65))
+            .with_price("google/gemini-3.6-flash", ModelPrice(1.65, 8.25, 0.165, 1.65))
+            .with_price("google/gemini-3.5-flash", ModelPrice(1.65, 9.90, 0.165, 1.65))
+            .with_price("google/gemini-3.5-flash-lite", ModelPrice(0.33, 2.75, 0.033, 0.33))
+            .with_price("google/gemini-3.1-flash-lite", ModelPrice(0.275, 1.65, 0.0275, 0.275))
+            .with_price("google/gemini-2.5-pro", ModelPrice(2.50, 15.00, 0.25, 2.50))
+            .with_price("google/gemini-2.5-flash", ModelPrice(0.30, 2.50, 0.03, 0.30))
+            .with_price("google/gemini-2.5-flash-lite", ModelPrice(0.10, 0.40, 0.01, 0.10))
             #
             # OpenAI, current lineup. No separate cache-write fee (the
             # first pass through is billed as ordinary input), so
