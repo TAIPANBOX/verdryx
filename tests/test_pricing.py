@@ -108,7 +108,7 @@ def test_price_book_unknown_model_with_fallback_resolves_via_fallback() -> None:
 #: (model, input_per_mtok, output_per_mtok, cache_read_per_mtok,
 #: cache_write_per_mtok), every row of tokenfuse's published price book,
 #: `contracts/tokenfuse-constants.json` `price_book.models` at tokenfuse
-#: commit ead13bc (main, 2026-10-07), in the artifact's own order (sorted by
+#: commit 31f7b43 (main, 2026-10-08), in the artifact's own order (sorted by
 #: model id). Converted from integer micro-USD per Mtok to USD per Mtok.
 #: estate-gates' C3 compares the same four rates against the same artifact;
 #: this list is the copy a verdryx test run can see without that repository.
@@ -165,6 +165,16 @@ _EXPECTED_DEFAULT_ENTRIES = [
     ("global.anthropic.claude-opus-4-6-v1", 5.00, 25.00, 0.50, 6.25),
     ("global.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.00, 15.00, 0.30, 3.75),
     ("global.anthropic.claude-sonnet-4-6", 3.00, 15.00, 0.30, 3.75),
+    ("google/gemini-2.5-flash", 0.30, 2.50, 0.03, 0.30),
+    ("google/gemini-2.5-flash-lite", 0.10, 0.40, 0.01, 0.10),
+    ("google/gemini-2.5-pro", 2.50, 15.00, 0.25, 2.50),
+    ("google/gemini-3.1-flash-lite", 0.275, 1.65, 0.0275, 0.275),
+    ("google/gemini-3.5-flash", 1.65, 9.90, 0.165, 1.65),
+    ("google/gemini-3.5-flash-lite", 0.33, 2.75, 0.033, 0.33),
+    ("google/gemini-3.6-flash", 1.65, 8.25, 0.165, 1.65),
+    ("google/gemini-3.7-flash", 1.65, 8.25, 0.165, 1.65),
+    ("google/gemini-3.8-flash", 1.65, 8.25, 0.165, 1.65),
+    ("google/gemini-3.8-flash-cyber", 1.65, 8.25, 0.165, 1.65),
     ("gpt", 2.50, 10.00, 0.25, 3.125),
     ("gpt-4o", 2.50, 10.00, 1.25, 2.50),
     ("gpt-4o-mini", 0.15, 0.60, 0.075, 0.15),
@@ -322,6 +332,18 @@ def test_price_book_default_fallback_stays_at_least_as_expensive_as_opus() -> No
         entry = book.lookup(model)
         assert fallback.input_per_mtok_usd >= entry.input_per_mtok_usd, model
         assert fallback.output_per_mtok_usd >= entry.output_per_mtok_usd, model
+
+
+def test_price_book_default_prices_the_measured_vertex_gemini_call_at_list() -> None:
+    """The call tokenfuse's invariant 80 measured on 2026-10-07 through Vertex
+    AI's OpenAI-compatible endpoint: google/gemini-2.5-flash, 14 input and
+    619 output tokens (the reasoning counted as output). At Google's 0.30 /
+    2.50 per Mtok that is $0.0015517; tokenfuse settles it at 1552 micro-USD
+    after rounding up once. At the 15 / 75 fallback it was $0.046635."""
+    book = PriceBook.default()
+    assert book.is_known("google/gemini-2.5-flash")
+    cost = book.price("google/gemini-2.5-flash", input_tokens=14, output_tokens=619)
+    assert cost == pytest.approx(0.0015517)
 
 
 def test_price_book_default_fallback_never_raises_for_unknown_model() -> None:
