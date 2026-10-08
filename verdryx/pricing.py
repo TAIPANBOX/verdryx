@@ -122,13 +122,21 @@ class PriceBook:
         """The price book Verdryx's built-in adapters use unless a caller
         injects their own.
 
-        Ported number-for-number from tokenfuse's
-        `crates/gateway/src/pricebook.rs` `default_price_book()`. Prices as
-        of 2026-07; verify against
+        Ported number-for-number from tokenfuse's published price book,
+        `contracts/tokenfuse-constants.json` (`price_book.models`), at
+        tokenfuse commit ead13bc (main, 2026-10-07), which is generated from
+        `crates/gateway/src/pricebook.rs` `default_price_book()`. Anthropic
+        rates as tokenfuse read them on 2026-10-07; OpenAI rates as of
+        2026-07. Verify against
         https://platform.claude.com/docs/en/about-claude/pricing and
         https://developers.openai.com/api/docs/pricing before relying on
         them for anything beyond a rough estimate, same disclaimer
         tokenfuse's own price book carries.
+
+        Not mirrored: tokenfuse's fifth rate, the 1-hour cache write
+        (`cache_write_1h_per_mtok`). `ModelPrice` here carries four rates
+        and no caller reports a 1-hour subset, so it has nothing to price.
+        estate-gates' C3 compares the four rates carried here.
         """
         return (
             cls()
@@ -139,16 +147,150 @@ class PriceBook:
             .with_price("claude-haiku", ModelPrice(0.80, 4.0, 0.08, 1.0))
             .with_price("gpt", ModelPrice(2.5, 10.0, 0.25, 3.125))
             #
-            # Anthropic, current lineup. Cache write/read follow Anthropic's
-            # published multiplier off the input rate (5-minute TTL: write
-            # = 1.25x input, read = 0.1x input). Both the "latest" alias and
-            # the dated snapshot are entered so either resolves exactly.
-            .with_price("claude-haiku-4-5", ModelPrice(1.00, 5.00, 0.10, 1.25))
-            .with_price("claude-haiku-4-5-20251001", ModelPrice(1.00, 5.00, 0.10, 1.25))
-            .with_price("claude-sonnet-4-5", ModelPrice(3.00, 15.00, 0.30, 3.75))
-            .with_price("claude-sonnet-4-5-20250929", ModelPrice(3.00, 15.00, 0.30, 3.75))
+            # Anthropic: every listed Claude id, as tokenfuse prices it. Ids
+            # sold at the list rate (the Claude API, Google Cloud's dateless
+            # ids, a Bedrock `global.` profile, OpenRouter) carry the list
+            # rate; an id whose endpoint may be regional (a Bedrock `us.`,
+            # `eu.`, `jp.` or `apac.` profile, a bare Bedrock `anthropic.*`
+            # id, a Google `@`-dated id) carries list plus 10 percent, the
+            # over-charging side. Tokenfuse builds these rows from one table
+            # with a `regional()` helper; they are written out one by one
+            # here because estate-gates' C3 reads this mirror as literal
+            # `.with_price(...)` calls, and a loop would hide them from it.
+            # The comment above each family is tokenfuse's own, verbatim.
+            #
+            # Claude Fable 5.1: 10 / 50, cache hits 0.25 (0.025x), writes 12.50 / 20.
+            .with_price("claude-fable-5-1", ModelPrice(10.00, 50.00, 0.25, 12.50))
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("anthropic.claude-fable-5-1", ModelPrice(11.00, 55.00, 0.275, 13.75))
+            #
+            # Claude Fable 5: 10 / 50, cache hits 1, writes 12.50 / 20.
+            .with_price("claude-fable-5", ModelPrice(10.00, 50.00, 1.00, 12.50))
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("anthropic.claude-fable-5", ModelPrice(11.00, 55.00, 1.10, 13.75))
+            #
+            # Claude Opus 5.5: 4 / 20, cache hits 0.20 (0.05x), writes 5 / 8.
+            .with_price("claude-opus-5-5", ModelPrice(4.00, 20.00, 0.20, 5.00))
+            .with_price("anthropic/claude-opus-5.5", ModelPrice(4.00, 20.00, 0.20, 5.00))
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("anthropic.claude-opus-5-5", ModelPrice(4.40, 22.00, 0.22, 5.50))
+            #
+            # Claude Opus 5: 5 / 25, cache hits 0.50, writes 6.25 / 10.
+            .with_price("claude-opus-5", ModelPrice(5.00, 25.00, 0.50, 6.25))
+            .with_price("anthropic/claude-opus-5", ModelPrice(5.00, 25.00, 0.50, 6.25))
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("anthropic.claude-opus-5", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            #
+            # Claude Opus 4.8: as Opus 5.
+            .with_price("claude-opus-4-8", ModelPrice(5.00, 25.00, 0.50, 6.25))
+            .with_price("anthropic/claude-opus-4.8", ModelPrice(5.00, 25.00, 0.50, 6.25))
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("anthropic.claude-opus-4-8", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            #
+            # Claude Opus 4.7: as Opus 5.
+            .with_price("claude-opus-4-7", ModelPrice(5.00, 25.00, 0.50, 6.25))
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("anthropic.claude-opus-4-7", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            #
+            # Claude Opus 4.6: as Opus 5. Bedrock profiles: global, us, eu, jp, apac.
+            .with_price("claude-opus-4-6", ModelPrice(5.00, 25.00, 0.50, 6.25))
+            .with_price("global.anthropic.claude-opus-4-6-v1", ModelPrice(5.00, 25.00, 0.50, 6.25))
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("anthropic.claude-opus-4-6-v1", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            .with_price("us.anthropic.claude-opus-4-6-v1", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            .with_price("eu.anthropic.claude-opus-4-6-v1", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            .with_price("jp.anthropic.claude-opus-4-6-v1", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            .with_price("apac.anthropic.claude-opus-4-6-v1", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            #
+            # Claude Opus 4.5: as Opus 5 (a 67 percent cut from Opus 4.1's 15 / 75).
+            # `claude-opus-4-5` is the Claude API alias of the dated snapshot; the
+            # book has no alias mechanism, so both are rows. Bedrock: global, us, eu.
             .with_price("claude-opus-4-5", ModelPrice(5.00, 25.00, 0.50, 6.25))
             .with_price("claude-opus-4-5-20251101", ModelPrice(5.00, 25.00, 0.50, 6.25))
+            .with_price(
+                "global.anthropic.claude-opus-4-5-20251101-v1:0",
+                ModelPrice(5.00, 25.00, 0.50, 6.25),
+            )
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("claude-opus-4-5@20251101", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            .with_price(
+                "anthropic.claude-opus-4-5-20251101-v1:0", ModelPrice(5.50, 27.50, 0.55, 6.875)
+            )
+            .with_price(
+                "us.anthropic.claude-opus-4-5-20251101-v1:0", ModelPrice(5.50, 27.50, 0.55, 6.875)
+            )
+            .with_price(
+                "eu.anthropic.claude-opus-4-5-20251101-v1:0", ModelPrice(5.50, 27.50, 0.55, 6.875)
+            )
+            #
+            # Claude Sonnet 5.5: 2 / 10, cache hits 0.20, writes 2.50 / 4.
+            .with_price("claude-sonnet-5-5", ModelPrice(2.00, 10.00, 0.20, 2.50))
+            .with_price("anthropic/claude-sonnet-5.5", ModelPrice(2.00, 10.00, 0.20, 2.50))
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("anthropic.claude-sonnet-5-5", ModelPrice(2.20, 11.00, 0.22, 2.75))
+            #
+            # Claude Sonnet 5: 2 / 10, as Sonnet 5.5. The page's footnote: the 2 / 10
+            # launch price "is now the standard price" and the increase to 3 / 15
+            # scheduled for 2026-09-01 "will not occur". tokenfuse#305 assumed 3 / 15.
+            .with_price("claude-sonnet-5", ModelPrice(2.00, 10.00, 0.20, 2.50))
+            .with_price("anthropic/claude-sonnet-5", ModelPrice(2.00, 10.00, 0.20, 2.50))
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("anthropic.claude-sonnet-5", ModelPrice(2.20, 11.00, 0.22, 2.75))
+            #
+            # Claude Sonnet 4.6: 3 / 15, cache hits 0.30, writes 3.75 / 6. Bedrock:
+            # global, us, eu, jp.
+            .with_price("claude-sonnet-4-6", ModelPrice(3.00, 15.00, 0.30, 3.75))
+            .with_price("global.anthropic.claude-sonnet-4-6", ModelPrice(3.00, 15.00, 0.30, 3.75))
+            .with_price("anthropic/claude-sonnet-4.6", ModelPrice(3.00, 15.00, 0.30, 3.75))
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("anthropic.claude-sonnet-4-6", ModelPrice(3.30, 16.50, 0.33, 4.125))
+            .with_price("us.anthropic.claude-sonnet-4-6", ModelPrice(3.30, 16.50, 0.33, 4.125))
+            .with_price("eu.anthropic.claude-sonnet-4-6", ModelPrice(3.30, 16.50, 0.33, 4.125))
+            .with_price("jp.anthropic.claude-sonnet-4-6", ModelPrice(3.30, 16.50, 0.33, 4.125))
+            #
+            # Claude Sonnet 4.5 (deprecated): as Sonnet 4.6. Bedrock: global, us, eu, jp.
+            .with_price("claude-sonnet-4-5", ModelPrice(3.00, 15.00, 0.30, 3.75))
+            .with_price("claude-sonnet-4-5-20250929", ModelPrice(3.00, 15.00, 0.30, 3.75))
+            .with_price(
+                "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                ModelPrice(3.00, 15.00, 0.30, 3.75),
+            )
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("claude-sonnet-4-5@20250929", ModelPrice(3.30, 16.50, 0.33, 4.125))
+            .with_price(
+                "anthropic.claude-sonnet-4-5-20250929-v1:0", ModelPrice(3.30, 16.50, 0.33, 4.125)
+            )
+            .with_price(
+                "us.anthropic.claude-sonnet-4-5-20250929-v1:0", ModelPrice(3.30, 16.50, 0.33, 4.125)
+            )
+            .with_price(
+                "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", ModelPrice(3.30, 16.50, 0.33, 4.125)
+            )
+            .with_price(
+                "jp.anthropic.claude-sonnet-4-5-20250929-v1:0", ModelPrice(3.30, 16.50, 0.33, 4.125)
+            )
+            #
+            # Claude Haiku 4.5: 1 / 5, cache hits 0.10, writes 1.25 / 2. Bedrock
+            # Messages-API id `anthropic.claude-haiku-4-5`; InvokeModel profiles:
+            # global, us, eu.
+            .with_price("claude-haiku-4-5", ModelPrice(1.00, 5.00, 0.10, 1.25))
+            .with_price("claude-haiku-4-5-20251001", ModelPrice(1.00, 5.00, 0.10, 1.25))
+            .with_price(
+                "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+                ModelPrice(1.00, 5.00, 0.10, 1.25),
+            )
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("claude-haiku-4-5@20251001", ModelPrice(1.10, 5.50, 0.11, 1.375))
+            .with_price("anthropic.claude-haiku-4-5", ModelPrice(1.10, 5.50, 0.11, 1.375))
+            .with_price(
+                "anthropic.claude-haiku-4-5-20251001-v1:0", ModelPrice(1.10, 5.50, 0.11, 1.375)
+            )
+            .with_price(
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0", ModelPrice(1.10, 5.50, 0.11, 1.375)
+            )
+            .with_price(
+                "eu.anthropic.claude-haiku-4-5-20251001-v1:0", ModelPrice(1.10, 5.50, 0.11, 1.375)
+            )
             #
             # OpenAI, current lineup. No separate cache-write fee (the
             # first pass through is billed as ordinary input), so
