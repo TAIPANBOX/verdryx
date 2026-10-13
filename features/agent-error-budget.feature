@@ -1,8 +1,8 @@
 Feature: When is an agent reliable enough
 
   The ask, 2026-08-26: SLOs for agents, so that an error budget is a number an
-  operator can reason about rather than a feeling. `@yurii 2026-08-26`, on how
-  far it goes: "лише вимірювання".
+  operator can reason about rather than a feeling. `@decided 2026-08-26`: the
+  scope is measurement only, with no enforcement.
 
   Enterprises say quality, not cost, is what blocks agents from production, and
   the thing they cannot say is when one is reliable enough. This plane already

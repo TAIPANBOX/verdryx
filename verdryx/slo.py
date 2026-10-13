@@ -52,7 +52,7 @@ inventing one from the gap between two rows would be measuring the agent's
 think time and the operator's queue as one number.
 
 **Enforcement.** This module MEASURES. It writes no policy, demotes no agent
-and gates nothing. `@yurii 2026-08-26`: "лише вимірювання". That is not a
+and gates nothing. `@decided 2026-08-26`: measurement only. That is not a
 half-built state waiting to be finished, it is the honest shape of what the
 estate can support today, and the reason is worth carrying:
 
