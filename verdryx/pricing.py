@@ -59,6 +59,22 @@ class ModelPrice:
         ) / 1_000_000
 
 
+@dataclass(frozen=True)
+class LongContext:
+    """A model's long-prompt rate: every part of a call whose prompt is
+    longer than ``above_prompt_tokens`` is priced at ``price``.
+
+    Mirrors tokenfuse's ``tokenfuse_core::pricing::LongContext`` (its
+    invariant 99). The prompt is every input token, cache reads and cache
+    writes included, which is how Anthropic counts Haiku 5.5's 100,000-token
+    tier and the gross prompt OpenAI's 272K and Google's 200K tiers are
+    measured on. A prompt exactly at the threshold is still the base rate.
+    """
+
+    above_prompt_tokens: int
+    price: ModelPrice
+
+
 class PriceBook:
     """Model name -> ModelPrice lookup, with an optional conservative
     fallback for models with no exact entry.
@@ -73,12 +89,26 @@ class PriceBook:
 
     def __init__(self) -> None:
         self._prices: dict[str, ModelPrice] = {}
+        self._long: dict[str, LongContext] = {}
         self._fallback: ModelPrice | None = None
 
     def with_price(self, model: str, price: ModelPrice) -> PriceBook:
         """Register an exact-match entry. Returns self, for chaining."""
         self._prices[model] = price
         return self
+
+    def with_long_context(
+        self, model: str, above_prompt_tokens: int, price: ModelPrice
+    ) -> PriceBook:
+        """Give an exact entry a long-prompt rate (see `LongContext`).
+        Returns self, for chaining. A model with no exact entry never has
+        one: the fallback is a single rate."""
+        self._long[model] = LongContext(above_prompt_tokens, price)
+        return self
+
+    def long_context(self, model: str) -> LongContext | None:
+        """`model`'s long-prompt rate, or None when it has none."""
+        return self._long.get(model)
 
     def with_fallback(self, price: ModelPrice) -> PriceBook:
         """Set the price used for a model with no exact entry. Returns
@@ -106,6 +136,11 @@ class PriceBook:
     ) -> float:
         """USD cost of one call against this book.
 
+        A model with a long-prompt rate (`with_long_context`) is priced
+        whole at that rate when its prompt, input plus cache read plus
+        cache write tokens, is above the threshold, as tokenfuse's
+        ``PriceBook::cost`` does; `lookup` always answers the base rate.
+
         Raises:
             ValueError: If `model` has no exact entry and no fallback is
                 configured. `PriceBook.default()` always sets a fallback,
@@ -115,6 +150,10 @@ class PriceBook:
         entry = self.lookup(model)
         if entry is None:
             raise ValueError(f"no price for {model!r} and PriceBook has no fallback configured")
+        long = self._long.get(model) if model in self._prices else None
+        prompt = input_tokens + cache_read_tokens + cache_write_tokens
+        if long is not None and prompt > long.above_prompt_tokens:
+            entry = long.price
         return entry.cost_usd(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
 
     @classmethod
@@ -123,17 +162,27 @@ class PriceBook:
         injects their own.
 
         Ported number-for-number from tokenfuse's published price book,
-        `contracts/tokenfuse-constants.json` (`price_book.models`), at
-        tokenfuse commit 31f7b43 (main, 2026-10-08), which is generated from
-        `crates/gateway/src/pricebook.rs` `default_price_book()`. Anthropic
-        rates as tokenfuse read them on 2026-10-07; Google's Gemini rates
-        on Vertex AI as it read them on 2026-10-08; OpenAI rates as of
-        2026-07. Verify against
+        `contracts/tokenfuse-constants.json` (`price_book.models` and
+        `price_book.long_context`), at tokenfuse commit 85dbcd7 (main,
+        2026-10-13), which is generated from `crates/gateway/src/pricebook.rs`
+        `default_price_book()`. Every rate as tokenfuse read it from the
+        vendor's own page on 2026-10-13 (Anthropic, OpenAI, Google's Vertex
+        AI, DeepSeek, Moonshot, Z.ai), Gemini 2.5 Flash and Flash-Lite and
+        the Gemini 3.x Flash rows as read on 2026-10-08. Verify against
         https://platform.claude.com/docs/en/about-claude/pricing,
-        https://cloud.google.com/vertex-ai/generative-ai/pricing and
-        https://developers.openai.com/api/docs/pricing before relying on
-        them for anything beyond a rough estimate, same disclaimer
-        tokenfuse's own price book carries.
+        https://cloud.google.com/vertex-ai/generative-ai/pricing,
+        https://developers.openai.com/api/docs/pricing,
+        https://api-docs.deepseek.com/quick_start/pricing,
+        https://platform.kimi.ai/docs/pricing/chat and
+        https://docs.z.ai/guides/overview/pricing before relying on them for
+        anything beyond a rough estimate, same disclaimer tokenfuse's own
+        price book carries.
+
+        Long-prompt tiers (tokenfuse's invariant 99) are mirrored with
+        `with_long_context`: a call whose prompt (input + cache read + cache
+        write tokens) is above the threshold is priced whole at the long
+        rate. estate-gates' C3 reads only the `.with_price(...)` rows; the
+        tiers are held by this repository's own pinned test.
 
         Not mirrored: tokenfuse's fifth rate, the 1-hour cache write
         (`cache_write_1h_per_mtok`). `ModelPrice` here carries four rates
@@ -225,11 +274,11 @@ class PriceBook:
                 "eu.anthropic.claude-opus-4-5-20251101-v1:0", ModelPrice(5.50, 27.50, 0.55, 6.875)
             )
             #
-            # Claude Sonnet 5.5: 2 / 10, cache hits 0.20, writes 2.50 / 4.
-            .with_price("claude-sonnet-5-5", ModelPrice(2.00, 10.00, 0.20, 2.50))
-            .with_price("anthropic/claude-sonnet-5.5", ModelPrice(2.00, 10.00, 0.20, 2.50))
+            # Claude Sonnet 5.5: 2 / 10, cache hits 0.10 (0.05x), writes 2.50 / 4.
+            .with_price("claude-sonnet-5-5", ModelPrice(2.00, 10.00, 0.10, 2.50))
+            .with_price("anthropic/claude-sonnet-5.5", ModelPrice(2.00, 10.00, 0.10, 2.50))
             # Regional or endpoint-unnamed ids: list plus 10 percent.
-            .with_price("anthropic.claude-sonnet-5-5", ModelPrice(2.20, 11.00, 0.22, 2.75))
+            .with_price("anthropic.claude-sonnet-5-5", ModelPrice(2.20, 11.00, 0.11, 2.75))
             #
             # Claude Sonnet 5: 2 / 10, as Sonnet 5.5. The page's footnote: the 2 / 10
             # launch price "is now the standard price" and the increase to 3 / 15
@@ -272,6 +321,22 @@ class PriceBook:
                 "jp.anthropic.claude-sonnet-4-5-20250929-v1:0", ModelPrice(3.30, 16.50, 0.33, 4.125)
             )
             #
+            # Claude Haiku 5.5, priced by prompt length: up to 100,000 prompt
+            # tokens 0.10 / 0.50, cache hits 0.01, writes 0.125 / 0.20; over
+            # 100,000, 0.50 / 2.50, 0.05, 0.625 / 1. Bedrock
+            # `anthropic.claude-haiku-5-5` at list plus 10 percent on both tiers.
+            .with_price("claude-haiku-5-5", ModelPrice(0.10, 0.50, 0.01, 0.125))
+            .with_long_context("claude-haiku-5-5", 100_000, ModelPrice(0.50, 2.50, 0.05, 0.625))
+            .with_price("anthropic/claude-haiku-5.5", ModelPrice(0.10, 0.50, 0.01, 0.125))
+            .with_long_context(
+                "anthropic/claude-haiku-5.5", 100_000, ModelPrice(0.50, 2.50, 0.05, 0.625)
+            )
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("anthropic.claude-haiku-5-5", ModelPrice(0.11, 0.55, 0.011, 0.1375))
+            .with_long_context(
+                "anthropic.claude-haiku-5-5", 100_000, ModelPrice(0.55, 2.75, 0.055, 0.6875)
+            )
+            #
             # Claude Haiku 4.5: 1 / 5, cache hits 0.10, writes 1.25 / 2. Bedrock
             # Messages-API id `anthropic.claude-haiku-4-5`; InvokeModel profiles:
             # global, us, eu.
@@ -302,9 +367,11 @@ class PriceBook:
             # 2026-10-08. No cache-write fee, so cache_write is the input
             # rate. Each choice the page leaves open is taken on the
             # over-charging side: the Gemini 3 family at its non-global
-            # rate (the id does not name the endpoint), Gemini 2.5 Pro at
-            # its rate above 200K input tokens, Gemini 3.6, 3.7 and 3.8
-            # Flash at the standard rate, not the introductory credit.
+            # rate (the id does not name the endpoint), Gemini 3.6, 3.7 and
+            # 3.8 Flash at the standard rate, not the introductory credit.
+            # Gemini 2.5 Pro and 3.1 Pro Preview carry their rate above 200K
+            # prompt tokens as a long-prompt tier (read 2026-10-13); 3.1 Pro
+            # Preview lists a Global row only.
             .with_price("google/gemini-3.8-flash", ModelPrice(1.65, 8.25, 0.165, 1.65))
             .with_price("google/gemini-3.8-flash-cyber", ModelPrice(1.65, 8.25, 0.165, 1.65))
             .with_price("google/gemini-3.7-flash", ModelPrice(1.65, 8.25, 0.165, 1.65))
@@ -312,17 +379,59 @@ class PriceBook:
             .with_price("google/gemini-3.5-flash", ModelPrice(1.65, 9.90, 0.165, 1.65))
             .with_price("google/gemini-3.5-flash-lite", ModelPrice(0.33, 2.75, 0.033, 0.33))
             .with_price("google/gemini-3.1-flash-lite", ModelPrice(0.275, 1.65, 0.0275, 0.275))
-            .with_price("google/gemini-2.5-pro", ModelPrice(2.50, 15.00, 0.25, 2.50))
+            .with_price("google/gemini-3.1-pro-preview", ModelPrice(2.00, 12.00, 0.20, 2.00))
+            .with_long_context(
+                "google/gemini-3.1-pro-preview", 200_000, ModelPrice(4.00, 18.00, 0.40, 4.00)
+            )
+            .with_price("google/gemini-2.5-pro", ModelPrice(1.25, 10.00, 0.125, 1.25))
+            .with_long_context(
+                "google/gemini-2.5-pro", 200_000, ModelPrice(2.50, 15.00, 0.25, 2.50)
+            )
             .with_price("google/gemini-2.5-flash", ModelPrice(0.30, 2.50, 0.03, 0.30))
             .with_price("google/gemini-2.5-flash-lite", ModelPrice(0.10, 0.40, 0.01, 0.10))
             #
-            # OpenAI, current lineup. No separate cache-write fee (the
-            # first pass through is billed as ordinary input), so
-            # cache_write is set equal to input; cached-read is a flat 50%
-            # off input across these models.
+            # OpenAI, Standard tier, read by tokenfuse from
+            # https://developers.openai.com/api/docs/pricing on 2026-10-13.
+            # GPT-5.6 and later bill a cache write at 1.25x input; where the
+            # page shows no cache-write price there is no write fee, so
+            # cache_write is the input rate. The tiered models carry their
+            # rate above 272K prompt tokens as a long-prompt tier.
+            .with_price("gpt-6-astra", ModelPrice(10.00, 50.00, 1.00, 12.50))
+            .with_long_context("gpt-6-astra", 272_000, ModelPrice(20.00, 75.00, 2.00, 25.00))
+            .with_price("gpt-6.1-sol", ModelPrice(2.00, 10.00, 0.10, 2.50))
+            .with_long_context("gpt-6.1-sol", 272_000, ModelPrice(4.00, 15.00, 0.20, 5.00))
+            .with_price("gpt-6-sol", ModelPrice(2.00, 10.00, 0.20, 2.50))
+            .with_long_context("gpt-6-sol", 272_000, ModelPrice(4.00, 15.00, 0.40, 5.00))
+            .with_price("gpt-6-luna", ModelPrice(0.10, 0.50, 0.01, 0.125))
+            .with_long_context("gpt-6-luna", 272_000, ModelPrice(0.20, 0.75, 0.02, 0.25))
+            .with_price("gpt-5.6-sol", ModelPrice(4.00, 20.00, 0.40, 5.00))
+            .with_long_context("gpt-5.6-sol", 272_000, ModelPrice(8.00, 30.00, 0.80, 10.00))
+            .with_price("gpt-5.6-terra", ModelPrice(2.00, 12.00, 0.20, 2.50))
+            .with_long_context("gpt-5.6-terra", 272_000, ModelPrice(4.00, 18.00, 0.40, 5.00))
+            .with_price("gpt-5.6-luna", ModelPrice(0.20, 1.20, 0.02, 0.25))
+            .with_long_context("gpt-5.6-luna", 272_000, ModelPrice(0.40, 1.80, 0.04, 0.50))
+            .with_price("gpt-5.5", ModelPrice(5.00, 30.00, 0.50, 5.00))
+            .with_long_context("gpt-5.5", 272_000, ModelPrice(10.00, 45.00, 1.00, 10.00))
+            .with_price("gpt-5.4", ModelPrice(2.50, 15.00, 0.25, 2.50))
+            .with_long_context("gpt-5.4", 272_000, ModelPrice(5.00, 22.50, 0.50, 5.00))
+            .with_price("gpt-5.4-mini", ModelPrice(0.75, 4.50, 0.075, 0.75))
             .with_price("gpt-4o", ModelPrice(2.50, 10.00, 1.25, 2.50))
             .with_price("gpt-4o-mini", ModelPrice(0.15, 0.60, 0.075, 0.15))
             .with_price("o1", ModelPrice(15.00, 60.00, 7.50, 15.00))
+            #
+            # First-party APIs at their default endpoint, read by tokenfuse
+            # on 2026-10-13. DeepSeek at its PEAK rate (off-peak is half;
+            # the book does not price by the clock), no write fee; its two
+            # legacy names are billed at the Flash price. Moonshot's Kimi K3
+            # (writes 3.00 for 5 minutes, 6.00 for an hour; the 1-hour rate
+            # is not mirrored here). Z.ai's GLM-5.3 and GLM-5.1, no write fee.
+            .with_price("deepseek-flash", ModelPrice(0.30, 1.20, 0.006, 0.30))
+            .with_price("deepseek-v4-flash", ModelPrice(0.30, 1.20, 0.006, 0.30))
+            .with_price("deepseek-v4-flash-vision-exp", ModelPrice(0.30, 1.20, 0.006, 0.30))
+            .with_price("deepseek-v4-pro", ModelPrice(1.32, 3.96, 0.044, 1.32))
+            .with_price("kimi-k3", ModelPrice(3.00, 15.00, 0.30, 3.00))
+            .with_price("glm-5.3", ModelPrice(1.40, 4.40, 0.26, 1.40))
+            .with_price("glm-5.1", ModelPrice(1.40, 4.40, 0.26, 1.40))
             #
             # Conservative fallback for anything not listed above (mirrors
             # tokenfuse's ADR-8): priced at 3x Opus 4.5, the most expensive
