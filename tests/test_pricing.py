@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from verdryx.pricing import ModelPrice, PriceBook
+from verdryx.pricing import LongContext, ModelPrice, PriceBook
 
 # ------------------------------------------------------------------
 # ModelPrice.cost_usd
@@ -108,7 +108,7 @@ def test_price_book_unknown_model_with_fallback_resolves_via_fallback() -> None:
 #: (model, input_per_mtok, output_per_mtok, cache_read_per_mtok,
 #: cache_write_per_mtok), every row of tokenfuse's published price book,
 #: `contracts/tokenfuse-constants.json` `price_book.models` at tokenfuse
-#: commit 31f7b43 (main, 2026-10-08), in the artifact's own order (sorted by
+#: commit 85dbcd7 (main, 2026-10-13), in the artifact's own order (sorted by
 #: model id). Converted from integer micro-USD per Mtok to USD per Mtok.
 #: estate-gates' C3 compares the same four rates against the same artifact;
 #: this list is the copy a verdryx test run can see without that repository.
@@ -117,6 +117,7 @@ _EXPECTED_DEFAULT_ENTRIES = [
     ("anthropic.claude-fable-5-1", 11.00, 55.00, 0.275, 13.75),
     ("anthropic.claude-haiku-4-5", 1.10, 5.50, 0.11, 1.375),
     ("anthropic.claude-haiku-4-5-20251001-v1:0", 1.10, 5.50, 0.11, 1.375),
+    ("anthropic.claude-haiku-5-5", 0.11, 0.55, 0.011, 0.1375),
     ("anthropic.claude-opus-4-5-20251101-v1:0", 5.50, 27.50, 0.55, 6.875),
     ("anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
     ("anthropic.claude-opus-4-7", 5.50, 27.50, 0.55, 6.875),
@@ -126,13 +127,14 @@ _EXPECTED_DEFAULT_ENTRIES = [
     ("anthropic.claude-sonnet-4-5-20250929-v1:0", 3.30, 16.50, 0.33, 4.125),
     ("anthropic.claude-sonnet-4-6", 3.30, 16.50, 0.33, 4.125),
     ("anthropic.claude-sonnet-5", 2.20, 11.00, 0.22, 2.75),
-    ("anthropic.claude-sonnet-5-5", 2.20, 11.00, 0.22, 2.75),
+    ("anthropic.claude-sonnet-5-5", 2.20, 11.00, 0.11, 2.75),
+    ("anthropic/claude-haiku-5.5", 0.10, 0.50, 0.01, 0.125),
     ("anthropic/claude-opus-4.8", 5.00, 25.00, 0.50, 6.25),
     ("anthropic/claude-opus-5", 5.00, 25.00, 0.50, 6.25),
     ("anthropic/claude-opus-5.5", 4.00, 20.00, 0.20, 5.00),
     ("anthropic/claude-sonnet-4.6", 3.00, 15.00, 0.30, 3.75),
     ("anthropic/claude-sonnet-5", 2.00, 10.00, 0.20, 2.50),
-    ("anthropic/claude-sonnet-5.5", 2.00, 10.00, 0.20, 2.50),
+    ("anthropic/claude-sonnet-5.5", 2.00, 10.00, 0.10, 2.50),
     ("apac.anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
     ("claude-fable-5", 10.00, 50.00, 1.00, 12.50),
     ("claude-fable-5-1", 10.00, 50.00, 0.25, 12.50),
@@ -140,6 +142,7 @@ _EXPECTED_DEFAULT_ENTRIES = [
     ("claude-haiku-4-5", 1.00, 5.00, 0.10, 1.25),
     ("claude-haiku-4-5-20251001", 1.00, 5.00, 0.10, 1.25),
     ("claude-haiku-4-5@20251001", 1.10, 5.50, 0.11, 1.375),
+    ("claude-haiku-5-5", 0.10, 0.50, 0.01, 0.125),
     ("claude-opus-4-5", 5.00, 25.00, 0.50, 6.25),
     ("claude-opus-4-5-20251101", 5.00, 25.00, 0.50, 6.25),
     ("claude-opus-4-5@20251101", 5.50, 27.50, 0.55, 6.875),
@@ -154,12 +157,18 @@ _EXPECTED_DEFAULT_ENTRIES = [
     ("claude-sonnet-4-5@20250929", 3.30, 16.50, 0.33, 4.125),
     ("claude-sonnet-4-6", 3.00, 15.00, 0.30, 3.75),
     ("claude-sonnet-5", 2.00, 10.00, 0.20, 2.50),
-    ("claude-sonnet-5-5", 2.00, 10.00, 0.20, 2.50),
+    ("claude-sonnet-5-5", 2.00, 10.00, 0.10, 2.50),
+    ("deepseek-flash", 0.30, 1.20, 0.006, 0.30),
+    ("deepseek-v4-flash", 0.30, 1.20, 0.006, 0.30),
+    ("deepseek-v4-flash-vision-exp", 0.30, 1.20, 0.006, 0.30),
+    ("deepseek-v4-pro", 1.32, 3.96, 0.044, 1.32),
     ("eu.anthropic.claude-haiku-4-5-20251001-v1:0", 1.10, 5.50, 0.11, 1.375),
     ("eu.anthropic.claude-opus-4-5-20251101-v1:0", 5.50, 27.50, 0.55, 6.875),
     ("eu.anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
     ("eu.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.30, 16.50, 0.33, 4.125),
     ("eu.anthropic.claude-sonnet-4-6", 3.30, 16.50, 0.33, 4.125),
+    ("glm-5.1", 1.40, 4.40, 0.26, 1.40),
+    ("glm-5.3", 1.40, 4.40, 0.26, 1.40),
     ("global.anthropic.claude-haiku-4-5-20251001-v1:0", 1.00, 5.00, 0.10, 1.25),
     ("global.anthropic.claude-opus-4-5-20251101-v1:0", 5.00, 25.00, 0.50, 6.25),
     ("global.anthropic.claude-opus-4-6-v1", 5.00, 25.00, 0.50, 6.25),
@@ -167,8 +176,9 @@ _EXPECTED_DEFAULT_ENTRIES = [
     ("global.anthropic.claude-sonnet-4-6", 3.00, 15.00, 0.30, 3.75),
     ("google/gemini-2.5-flash", 0.30, 2.50, 0.03, 0.30),
     ("google/gemini-2.5-flash-lite", 0.10, 0.40, 0.01, 0.10),
-    ("google/gemini-2.5-pro", 2.50, 15.00, 0.25, 2.50),
+    ("google/gemini-2.5-pro", 1.25, 10.00, 0.125, 1.25),
     ("google/gemini-3.1-flash-lite", 0.275, 1.65, 0.0275, 0.275),
+    ("google/gemini-3.1-pro-preview", 2.00, 12.00, 0.20, 2.00),
     ("google/gemini-3.5-flash", 1.65, 9.90, 0.165, 1.65),
     ("google/gemini-3.5-flash-lite", 0.33, 2.75, 0.033, 0.33),
     ("google/gemini-3.6-flash", 1.65, 8.25, 0.165, 1.65),
@@ -178,15 +188,49 @@ _EXPECTED_DEFAULT_ENTRIES = [
     ("gpt", 2.50, 10.00, 0.25, 3.125),
     ("gpt-4o", 2.50, 10.00, 1.25, 2.50),
     ("gpt-4o-mini", 0.15, 0.60, 0.075, 0.15),
+    ("gpt-5.4", 2.50, 15.00, 0.25, 2.50),
+    ("gpt-5.4-mini", 0.75, 4.50, 0.075, 0.75),
+    ("gpt-5.5", 5.00, 30.00, 0.50, 5.00),
+    ("gpt-5.6-luna", 0.20, 1.20, 0.02, 0.25),
+    ("gpt-5.6-sol", 4.00, 20.00, 0.40, 5.00),
+    ("gpt-5.6-terra", 2.00, 12.00, 0.20, 2.50),
+    ("gpt-6-astra", 10.00, 50.00, 1.00, 12.50),
+    ("gpt-6-luna", 0.10, 0.50, 0.01, 0.125),
+    ("gpt-6-sol", 2.00, 10.00, 0.20, 2.50),
+    ("gpt-6.1-sol", 2.00, 10.00, 0.10, 2.50),
     ("jp.anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
     ("jp.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.30, 16.50, 0.33, 4.125),
     ("jp.anthropic.claude-sonnet-4-6", 3.30, 16.50, 0.33, 4.125),
+    ("kimi-k3", 3.00, 15.00, 0.30, 3.00),
     ("o1", 15.00, 60.00, 7.50, 15.00),
     ("us.anthropic.claude-haiku-4-5-20251001-v1:0", 1.10, 5.50, 0.11, 1.375),
     ("us.anthropic.claude-opus-4-5-20251101-v1:0", 5.50, 27.50, 0.55, 6.875),
     ("us.anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
     ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.30, 16.50, 0.33, 4.125),
     ("us.anthropic.claude-sonnet-4-6", 3.30, 16.50, 0.33, 4.125),
+]
+
+
+#: (model, above_prompt_tokens, input, output, cache_read, cache_write), every
+#: long-prompt tier of tokenfuse's published price book,
+#: `price_book.long_context` at the same commit (tokenfuse's invariant 99), in
+#: the artifact's order. estate-gates' C3 compares the base rows above and not
+#: these, so this list is the only check of the tiers outside tokenfuse.
+_EXPECTED_LONG_CONTEXT = [
+    ("anthropic.claude-haiku-5-5", 100000, 0.55, 2.75, 0.055, 0.6875),
+    ("anthropic/claude-haiku-5.5", 100000, 0.50, 2.50, 0.05, 0.625),
+    ("claude-haiku-5-5", 100000, 0.50, 2.50, 0.05, 0.625),
+    ("google/gemini-2.5-pro", 200000, 2.50, 15.00, 0.25, 2.50),
+    ("google/gemini-3.1-pro-preview", 200000, 4.00, 18.00, 0.40, 4.00),
+    ("gpt-5.4", 272000, 5.00, 22.50, 0.50, 5.00),
+    ("gpt-5.5", 272000, 10.00, 45.00, 1.00, 10.00),
+    ("gpt-5.6-luna", 272000, 0.40, 1.80, 0.04, 0.50),
+    ("gpt-5.6-sol", 272000, 8.00, 30.00, 0.80, 10.00),
+    ("gpt-5.6-terra", 272000, 4.00, 18.00, 0.40, 5.00),
+    ("gpt-6-astra", 272000, 20.00, 75.00, 2.00, 25.00),
+    ("gpt-6-luna", 272000, 0.20, 0.75, 0.02, 0.25),
+    ("gpt-6-sol", 272000, 4.00, 15.00, 0.40, 5.00),
+    ("gpt-6.1-sol", 272000, 4.00, 15.00, 0.20, 5.00),
 ]
 
 
@@ -207,6 +251,101 @@ def test_price_book_default_holds_exactly_the_pinned_models() -> None:
     model here that tokenfuse charges at the fallback rate."""
     book = PriceBook.default()
     assert set(book._prices) == {row[0] for row in _EXPECTED_DEFAULT_ENTRIES}
+
+
+@pytest.mark.parametrize(
+    "model,above,input_p,output_p,cache_read_p,cache_write_p", _EXPECTED_LONG_CONTEXT
+)
+def test_price_book_default_long_context_matches_tokenfuse_pricebook(
+    model: str,
+    above: int,
+    input_p: float,
+    output_p: float,
+    cache_read_p: float,
+    cache_write_p: float,
+) -> None:
+    assert PriceBook.default().long_context(model) == LongContext(
+        above, ModelPrice(input_p, output_p, cache_read_p, cache_write_p)
+    )
+
+
+def test_price_book_default_holds_exactly_the_pinned_tiers() -> None:
+    """No tier beyond the pinned list and none missing from it, for the
+    reason the rows have the same check: a tier verdryx holds that tokenfuse
+    does not prices a long call here at a rate tokenfuse never charges."""
+    book = PriceBook.default()
+    assert set(book._long) == {row[0] for row in _EXPECTED_LONG_CONTEXT}
+
+
+def _tiered() -> PriceBook:
+    # A test book written out here, not the default one: base 1 / 5 / 0.10 /
+    # 1.25, long 2 / 10 / 0.20 / 2.50 above 100,000 prompt tokens.
+    return (
+        PriceBook()
+        .with_price("m", ModelPrice(1.0, 5.0, 0.10, 1.25))
+        .with_long_context("m", 100_000, ModelPrice(2.0, 10.0, 0.20, 2.50))
+        .with_fallback(ModelPrice(15.0, 75.0, 1.5, 18.75))
+    )
+
+
+def test_a_prompt_at_the_threshold_is_base_and_one_token_over_is_long() -> None:
+    """Mirrors tokenfuse's a_prompt_at_the_threshold_is_base_and_one_token_over_is_long:
+    100,000 input tokens is "up to 100,000", the base rate, $0.10; 100,001 is
+    over, every part at the long rate, $0.200002."""
+    book = _tiered()
+    assert book.price("m", input_tokens=100_000, output_tokens=0) == pytest.approx(0.10)
+    assert book.price("m", input_tokens=100_001, output_tokens=0) == pytest.approx(0.200002)
+    assert book.lookup("m") == ModelPrice(1.0, 5.0, 0.10, 1.25)
+
+
+def test_cache_reads_and_writes_count_toward_the_prompt() -> None:
+    """40,000 input + 40,000 cache read + 20,001 cache write = 100,001, over the
+    line though no part is: 0.08 + 0.008 + 0.0500025 = $0.1380025, where the
+    base rate would be 0.04 + 0.004 + 0.02500125."""
+    book = _tiered()
+    cost = book.price(
+        "m",
+        input_tokens=40_000,
+        output_tokens=0,
+        cache_read_tokens=40_000,
+        cache_write_tokens=20_001,
+    )
+    assert cost == pytest.approx(0.1380025)
+
+
+def test_the_long_rate_prices_output_too() -> None:
+    """Over the line, output pays the long rate: 100,001 x 2 + 1,000 x 10 per
+    Mtok = $0.210002. A long answer does not move a short prompt."""
+    book = _tiered()
+    assert book.price("m", input_tokens=100_001, output_tokens=1_000) == pytest.approx(0.210002)
+    assert book.price("m", input_tokens=10, output_tokens=500_000) == pytest.approx(2.50001)
+
+
+def test_a_tier_on_a_model_with_no_row_is_ignored() -> None:
+    book = PriceBook().with_fallback(ModelPrice(15.0, 75.0, 1.5, 18.75))
+    book.with_long_context("ghost", 1, ModelPrice(0.0, 0.0))
+    assert book.price("ghost", input_tokens=1_000_000, output_tokens=0) == pytest.approx(15.0)
+
+
+def test_price_book_default_haiku_5_5_is_priced_by_prompt_length() -> None:
+    """tokenfuse's a_haiku_5_5_short_call_is_priced_at_its_base_rate and
+    ..._long_call_...: 1000 input / 500 output at 0.10 / 0.50 is $0.00035
+    (the 15 / 75 fallback charged $0.0525); 150,000 input / 1000 output is
+    over 100,000, so 0.50 / 2.50: $0.0775."""
+    book = PriceBook.default()
+    assert book.is_known("claude-haiku-5-5")
+    assert book.price("claude-haiku-5-5", input_tokens=1000, output_tokens=500) == pytest.approx(
+        0.00035
+    )
+    assert book.price(
+        "claude-haiku-5-5", input_tokens=150_000, output_tokens=1000
+    ) == pytest.approx(0.0775)
+
+
+def test_price_book_default_sonnet_5_5_cache_hits_are_five_percent_of_input() -> None:
+    """Anthropic's footnote 2: cache hits on Opus 5.5 and Sonnet 5.5 are 0.05x
+    input, 0.10 for Sonnet 5.5, where the row held Sonnet 5's 0.20."""
+    assert PriceBook.default().lookup("claude-sonnet-5-5").cache_read_per_mtok_usd == 0.10
 
 
 #: (id whose endpoint may be regional, the list-rate id of the same model).
