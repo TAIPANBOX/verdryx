@@ -184,7 +184,7 @@ via its `mapping` constructor argument. An unrecognized tag scores `0.0` by
 default rather than raising.
 
 `LLMJudgeGrader` takes an injected adapter satisfying the `LLMAdapter`
-protocol (`complete()` + `judge()`). Two are provided:
+protocol (`complete()`, `judge()` and `complete_with_tools()`). Two are provided:
 
 - `StubLLMAdapter`: deterministic, records every call, no network. This is
   what Verdryx's own tests use, and what `--model stub` selects on the CLI.
@@ -262,8 +262,9 @@ verdryx eval typed-cases.json --model stub --db verdryx.db \
 - `--typed-template ID` picks which typryx template to ask (default:
   `eval.outcome_met`).
 
-A typed case sends only `{"task": case.prompt, "final_answer": output}` to
-typryx: no rubric, no case id, nothing else. The verdict becomes the
+A typed case sends `{"task": case.prompt, "final_answer": output}` as its state
+to typryx, with the template id beside it and, while an eval run is in progress,
+the run's own id as `run_id`. No rubric and no case id. The verdict becomes the
 `Score`: a `noul` template's `probabilities["true"]` directly, a `score`
 template's probability-weighted mean level normalised to `[0, 1]`; a
 `choice` template has no order and is refused rather than scored. When
@@ -284,8 +285,8 @@ This replaced an earlier behaviour, kept here because the reason is worth
 knowing: before 2026-09-25, one unanswered case failed the WHOLE run, and
 any outcomes already posted to typryx for earlier cases in that run stayed
 in its ledger while the run itself was thrown away (verdryx#42). Measured
-against a real backend the same day (a local Ollama `qwen2.5:7b`), 3 of 60
-asks come back unanswered every time, so a 60-case run against it could
+against a real backend on 2026-09-25 (a local Ollama `qwen2.5:7b`), 3 of 60
+asks came back unanswered in that run, so a 60-case run at that rate could
 never complete under the old behaviour.
 
 A refusal (its hourly cap, a bad key, an unknown template) or a typryx
@@ -306,7 +307,7 @@ posted, never guessed.
 
 ## Tool-call accuracy (tool_trace)
 
-A fifth grader, `ToolTraceGrader`, scores WHICH tools a model chose and IN
+A sixth grader, `ToolTraceGrader`, scores WHICH tools a model chose and IN
 WHAT ORDER, straight from the model's own `tool_use` content blocks. Verdryx
 already calls the model under evaluation for every non-`outcome_tag` case
 (via `LLMAdapter`); a `tool_trace` case sends the same prompt with a `tools`
