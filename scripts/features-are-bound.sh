@@ -13,10 +13,10 @@
 #
 # pytest-bdd here, godog in the Go repos, cucumber-rs in the Rust ones:
 # three runners and three step-definition styles across the estate, and the
-# value asked for here is READABILITY: Given/When/Then that Yurii can read
+# value asked for here is READABILITY: Given/When/Then that the owner can read
 # instead of a diff. A binding gate delivers that at a fraction of the surface.
-# This is my engineering call and a deviation from a literal reading of
-# "геркін-тести"; overrule it and I will wire a real runner.
+# This is my engineering call and a deviation from a literal reading of the
+# Gherkin request; overrule it and I will wire a real runner.
 #
 # WHAT THIS DOES NOT DO
 #

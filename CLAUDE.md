@@ -209,8 +209,8 @@ an absent invariant.
    scenario's prose still describes its test, and that limit is in the
    script.)*
 
-9. **This plane measures and does not enforce.** `@yurii 2026-08-26`: "лише
-   вимірювання". Not a half-built state: `slo.py` writes no wardryx policy,
+9. **This plane measures and does not enforce.** `@decided 2026-08-26`: measurement only, no enforcement.
+   Not a half-built state: `slo.py` writes no wardryx policy,
    demotes nothing and gates nothing, and the reasons are structural rather
    than a matter of effort. wardryx's PDP is a pure function of (policy set,
    request), held by its own `scripts/decision-path-purity.sh`, so it cannot
