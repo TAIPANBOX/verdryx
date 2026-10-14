@@ -108,7 +108,7 @@ def test_price_book_unknown_model_with_fallback_resolves_via_fallback() -> None:
 #: (model, input_per_mtok, output_per_mtok, cache_read_per_mtok,
 #: cache_write_per_mtok), every row of tokenfuse's published price book,
 #: `contracts/tokenfuse-constants.json` `price_book.models` at tokenfuse
-#: commit 85dbcd7 (main, 2026-10-13), in the artifact's own order (sorted by
+#: commit f75c912 (main, 2026-10-14), in the artifact's own order (sorted by
 #: model id). Converted from integer micro-USD per Mtok to USD per Mtok.
 #: estate-gates' C3 compares the same four rates against the same artifact;
 #: this list is the copy a verdryx test run can see without that repository.
@@ -186,6 +186,9 @@ _EXPECTED_DEFAULT_ENTRIES = [
     ("google/gemini-3.8-flash", 1.65, 8.25, 0.165, 1.65),
     ("google/gemini-3.8-flash-cyber", 1.65, 8.25, 0.165, 1.65),
     ("gpt", 2.50, 10.00, 0.25, 3.125),
+    ("gpt-4.1", 2.00, 8.00, 0.50, 2.00),
+    ("gpt-4.1-mini", 0.40, 1.60, 0.10, 0.40),
+    ("gpt-4.1-nano", 0.10, 0.40, 0.025, 0.10),
     ("gpt-4o", 2.50, 10.00, 1.25, 2.50),
     ("gpt-4o-mini", 0.15, 0.60, 0.075, 0.15),
     ("gpt-5.4", 2.50, 15.00, 0.25, 2.50),
@@ -203,6 +206,22 @@ _EXPECTED_DEFAULT_ENTRIES = [
     ("jp.anthropic.claude-sonnet-4-6", 3.30, 16.50, 0.33, 4.125),
     ("kimi-k3", 3.00, 15.00, 0.30, 3.00),
     ("o1", 15.00, 60.00, 7.50, 15.00),
+    ("openai/gpt-4.1", 2.00, 8.00, 0.50, 2.00),
+    ("openai/gpt-4.1-mini", 0.40, 1.60, 0.10, 0.40),
+    ("openai/gpt-4.1-nano", 0.10, 0.40, 0.025, 0.10),
+    ("openai/gpt-4o", 2.50, 10.00, 1.25, 2.50),
+    ("openai/gpt-4o-mini", 0.15, 0.60, 0.075, 0.15),
+    ("openai/gpt-5.4", 2.50, 15.00, 0.25, 2.50),
+    ("openai/gpt-5.4-mini", 0.75, 4.50, 0.075, 0.75),
+    ("openai/gpt-5.5", 5.00, 30.00, 0.50, 5.00),
+    ("openai/gpt-5.6-luna", 0.20, 1.20, 0.02, 0.25),
+    ("openai/gpt-5.6-sol", 4.00, 20.00, 0.40, 5.00),
+    ("openai/gpt-5.6-terra", 2.00, 12.00, 0.20, 2.50),
+    ("openai/gpt-6-astra", 10.00, 50.00, 1.00, 12.50),
+    ("openai/gpt-6-luna", 0.10, 0.50, 0.01, 0.125),
+    ("openai/gpt-6-sol", 2.00, 10.00, 0.20, 2.50),
+    ("openai/gpt-6.1-sol", 2.00, 10.00, 0.10, 2.50),
+    ("openai/o1", 15.00, 60.00, 7.50, 15.00),
     ("us.anthropic.claude-haiku-4-5-20251001-v1:0", 1.10, 5.50, 0.11, 1.375),
     ("us.anthropic.claude-opus-4-5-20251101-v1:0", 5.50, 27.50, 0.55, 6.875),
     ("us.anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
@@ -231,6 +250,15 @@ _EXPECTED_LONG_CONTEXT = [
     ("gpt-6-luna", 272000, 0.20, 0.75, 0.02, 0.25),
     ("gpt-6-sol", 272000, 4.00, 15.00, 0.40, 5.00),
     ("gpt-6.1-sol", 272000, 4.00, 15.00, 0.20, 5.00),
+    ("openai/gpt-5.4", 272000, 5.00, 22.50, 0.50, 5.00),
+    ("openai/gpt-5.5", 272000, 10.00, 45.00, 1.00, 10.00),
+    ("openai/gpt-5.6-luna", 272000, 0.40, 1.80, 0.04, 0.50),
+    ("openai/gpt-5.6-sol", 272000, 8.00, 30.00, 0.80, 10.00),
+    ("openai/gpt-5.6-terra", 272000, 4.00, 18.00, 0.40, 5.00),
+    ("openai/gpt-6-astra", 272000, 20.00, 75.00, 2.00, 25.00),
+    ("openai/gpt-6-luna", 272000, 0.20, 0.75, 0.02, 0.25),
+    ("openai/gpt-6-sol", 272000, 4.00, 15.00, 0.40, 5.00),
+    ("openai/gpt-6.1-sol", 272000, 4.00, 15.00, 0.20, 5.00),
 ]
 
 
@@ -346,6 +374,40 @@ def test_price_book_default_sonnet_5_5_cache_hits_are_five_percent_of_input() ->
     """Anthropic's footnote 2: cache hits on Opus 5.5 and Sonnet 5.5 are 0.05x
     input, 0.10 for Sonnet 5.5, where the row held Sonnet 5's 0.20."""
     assert PriceBook.default().lookup("claude-sonnet-5-5").cache_read_per_mtok_usd == 0.10
+
+
+#: The OpenAI ids tokenfuse prices (its `OPENAI` table), each bare and under
+#: OpenRouter's `openai/` name. An `openai/` id is OpenAI's own model sold at
+#: OpenAI's list rate (tokenfuse's invariant 107), so the two names must hold
+#: the same row and the same long-prompt tier.
+_OPENAI_IDS = [
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4.1-nano",
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.5",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
+    "o1",
+]
+
+
+@pytest.mark.parametrize("model", _OPENAI_IDS)
+def test_openrouter_openai_id_is_priced_at_the_openai_row(model: str) -> None:
+    book = PriceBook.default()
+    alias = f"openai/{model}"
+    assert book.is_known(model)
+    assert book.is_known(alias)
+    assert book.lookup(alias) == book.lookup(model)
+    assert book.long_context(alias) == book.long_context(model)
 
 
 #: (id whose endpoint may be regional, the list-rate id of the same model).

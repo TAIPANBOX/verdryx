@@ -163,12 +163,13 @@ class PriceBook:
 
         Ported number-for-number from tokenfuse's published price book,
         `contracts/tokenfuse-constants.json` (`price_book.models` and
-        `price_book.long_context`), at tokenfuse commit 85dbcd7 (main,
-        2026-10-13), which is generated from `crates/gateway/src/pricebook.rs`
+        `price_book.long_context`), at tokenfuse commit f75c912 (main,
+        2026-10-14), which is generated from `crates/gateway/src/pricebook.rs`
         `default_price_book()`. Every rate as tokenfuse read it from the
         vendor's own page on 2026-10-13 (Anthropic, OpenAI, Google's Vertex
-        AI, DeepSeek, Moonshot, Z.ai), Gemini 2.5 Flash and Flash-Lite and
-        the Gemini 3.x Flash rows as read on 2026-10-08. Verify against
+        AI, DeepSeek, Moonshot, Z.ai), the GPT-4.1 family as read on
+        2026-10-14, Gemini 2.5 Flash and Flash-Lite and the Gemini 3.x Flash
+        rows as read on 2026-10-08. Verify against
         https://platform.claude.com/docs/en/about-claude/pricing,
         https://cloud.google.com/vertex-ai/generative-ai/pricing,
         https://developers.openai.com/api/docs/pricing,
@@ -417,7 +418,45 @@ class PriceBook:
             .with_price("gpt-5.4-mini", ModelPrice(0.75, 4.50, 0.075, 0.75))
             .with_price("gpt-4o", ModelPrice(2.50, 10.00, 1.25, 2.50))
             .with_price("gpt-4o-mini", ModelPrice(0.15, 0.60, 0.075, 0.15))
+            # The GPT-4.1 family, read by tokenfuse on 2026-10-14 from the same
+            # page: 2.00 / 8.00, cached 0.50; mini 0.40 / 1.60, cached 0.10;
+            # nano 0.10 / 0.40, cached 0.025. Cache writes show "-", so the
+            # write rate is the input rate. No long-prompt tier is listed.
+            .with_price("gpt-4.1", ModelPrice(2.00, 8.00, 0.50, 2.00))
+            .with_price("gpt-4.1-mini", ModelPrice(0.40, 1.60, 0.10, 0.40))
+            .with_price("gpt-4.1-nano", ModelPrice(0.10, 0.40, 0.025, 0.10))
             .with_price("o1", ModelPrice(15.00, 60.00, 7.50, 15.00))
+            #
+            # OpenRouter's `openai/<id>` names for every OpenAI id above, at the same
+            # rates and with the same long-prompt tier. An `openai/` id names OpenAI's
+            # own model sold at OpenAI's list rate, so the vendor's row is the honest
+            # price (tokenfuse's invariant 107). An `openai/` id with no row above
+            # stays at the fallback.
+            .with_price("openai/gpt-4.1", ModelPrice(2.00, 8.00, 0.50, 2.00))
+            .with_price("openai/gpt-4.1-mini", ModelPrice(0.40, 1.60, 0.10, 0.40))
+            .with_price("openai/gpt-4.1-nano", ModelPrice(0.10, 0.40, 0.025, 0.10))
+            .with_price("openai/gpt-4o", ModelPrice(2.50, 10.00, 1.25, 2.50))
+            .with_price("openai/gpt-4o-mini", ModelPrice(0.15, 0.60, 0.075, 0.15))
+            .with_price("openai/gpt-5.4", ModelPrice(2.50, 15.00, 0.25, 2.50))
+            .with_long_context("openai/gpt-5.4", 272_000, ModelPrice(5.00, 22.50, 0.50, 5.00))
+            .with_price("openai/gpt-5.4-mini", ModelPrice(0.75, 4.50, 0.075, 0.75))
+            .with_price("openai/gpt-5.5", ModelPrice(5.00, 30.00, 0.50, 5.00))
+            .with_long_context("openai/gpt-5.5", 272_000, ModelPrice(10.00, 45.00, 1.00, 10.00))
+            .with_price("openai/gpt-5.6-luna", ModelPrice(0.20, 1.20, 0.02, 0.25))
+            .with_long_context("openai/gpt-5.6-luna", 272_000, ModelPrice(0.40, 1.80, 0.04, 0.50))
+            .with_price("openai/gpt-5.6-sol", ModelPrice(4.00, 20.00, 0.40, 5.00))
+            .with_long_context("openai/gpt-5.6-sol", 272_000, ModelPrice(8.00, 30.00, 0.80, 10.00))
+            .with_price("openai/gpt-5.6-terra", ModelPrice(2.00, 12.00, 0.20, 2.50))
+            .with_long_context("openai/gpt-5.6-terra", 272_000, ModelPrice(4.00, 18.00, 0.40, 5.00))
+            .with_price("openai/gpt-6-astra", ModelPrice(10.00, 50.00, 1.00, 12.50))
+            .with_long_context("openai/gpt-6-astra", 272_000, ModelPrice(20.00, 75.00, 2.00, 25.00))
+            .with_price("openai/gpt-6-luna", ModelPrice(0.10, 0.50, 0.01, 0.125))
+            .with_long_context("openai/gpt-6-luna", 272_000, ModelPrice(0.20, 0.75, 0.02, 0.25))
+            .with_price("openai/gpt-6-sol", ModelPrice(2.00, 10.00, 0.20, 2.50))
+            .with_long_context("openai/gpt-6-sol", 272_000, ModelPrice(4.00, 15.00, 0.40, 5.00))
+            .with_price("openai/gpt-6.1-sol", ModelPrice(2.00, 10.00, 0.10, 2.50))
+            .with_long_context("openai/gpt-6.1-sol", 272_000, ModelPrice(4.00, 15.00, 0.20, 5.00))
+            .with_price("openai/o1", ModelPrice(15.00, 60.00, 7.50, 15.00))
             #
             # First-party APIs at their default endpoint, read by tokenfuse
             # on 2026-10-13. DeepSeek at its PEAK rate (off-peak is half;
