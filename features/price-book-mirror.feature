@@ -31,3 +31,9 @@ Feature: The price book verdryx prices a judge with is tokenfuse's, tiers includ
     Given a tiered model with a threshold of 100000 prompt tokens
     When a call sends 40000 input, 40000 cache read and 20001 cache write tokens
     Then the whole call is priced at the long rate
+
+  # @test:test_openrouter_openai_id_is_priced_at_the_openai_row
+  Scenario: An OpenRouter openai/ name is priced at the row of the OpenAI model it names
+    Given an OpenAI model sold under OpenRouter's openai/ name
+    When verdryx looks up that name
+    Then it holds the same four rates and the same long-prompt tier as the OpenAI name
