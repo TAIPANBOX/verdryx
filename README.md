@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB.svg)
-![tests](https://img.shields.io/badge/tests-655-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-658-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/phase-1%20(mvp)-success.svg)
 
@@ -199,12 +199,14 @@ protocol (`complete()`, `judge()` and `complete_with_tools()`). Two are provided
   dollar figure, not the `0.0` placeholder the other three graders leave in
   place (they make no model call, so there is nothing to price).
 
-The candidate output a judge grades is wrapped in an `<output>` tag with an
+The candidate output a judge grades is wrapped in an `<output-...>` block with an
 instruction to treat it as inert data, the same delimited-block technique
-Engram uses for episodic content: grading untrusted agent output is exactly
-the kind of place a prompt injection would try to hijack the grader, so the
-judge prompt is built defensively even though Verdryx itself never acts on
-what it reads.
+Engram uses for episodic content. The closing tag carries a random token drawn
+fresh for every call, so the output cannot close its own block and write to the
+judge from outside it; a fixed `</output>` could be closed by the output itself.
+Grading untrusted agent output is exactly the kind of place a prompt injection
+would try to hijack the grader, so the judge prompt is built defensively even
+though Verdryx itself never acts on what it reads.
 
 **Drift** (`compute_drift(recent_runs, baseline, threshold=0.05)`) pools
 every case score across a window of the most recent eval runs into one mean

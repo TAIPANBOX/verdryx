@@ -250,6 +250,19 @@ an absent invariant.
     *(partly gated: CI prints the number every run; the README figure is a
     restated `@measured` snapshot, not cross-checked by a script)*
 
+12. **A graded output cannot write into the judge's instructions.** The
+    candidate output sits in a block whose closing tag carries a random token
+    drawn fresh for every call, so nothing the output contains can close the
+    block from inside. The prompt and rubric keep fixed tags, because they
+    come from the eval set and not from the agent under test. A closing tag
+    that is fixed, or short enough to guess, is the defect this invariant
+    names.
+    *(test: `tests/test_graders.py::test_judge_message_output_cannot_close_its_own_block`,
+    with `test_judge_message_fence_is_fresh_on_every_call` and
+    `test_judge_message_fence_carries_at_least_128_bits`; behavioural, so no
+    gate script: a text check on the message builder would not hold the
+    property)*
+
 ## Decisions that have no gate yet
 
 This list is debt, and it is here to stay visible rather than to be tidy.
