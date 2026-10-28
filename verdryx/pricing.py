@@ -401,6 +401,9 @@ class PriceBook:
             .with_long_context("gpt-6-astra", 272_000, ModelPrice(20.00, 75.00, 2.00, 25.00))
             .with_price("gpt-6.1-sol", ModelPrice(2.00, 10.00, 0.10, 2.50))
             .with_long_context("gpt-6.1-sol", 272_000, ModelPrice(4.00, 15.00, 0.20, 5.00))
+            # gpt-6.1-terra, read by tokenfuse on 2026-10-28 (tokenfuse#488).
+            .with_price("gpt-6.1-terra", ModelPrice(1.00, 5.00, 0.05, 1.25))
+            .with_long_context("gpt-6.1-terra", 272_000, ModelPrice(2.00, 7.50, 0.10, 2.50))
             .with_price("gpt-6-sol", ModelPrice(2.00, 10.00, 0.20, 2.50))
             .with_long_context("gpt-6-sol", 272_000, ModelPrice(4.00, 15.00, 0.40, 5.00))
             .with_price("gpt-6-luna", ModelPrice(0.10, 0.50, 0.01, 0.125))
@@ -456,6 +459,8 @@ class PriceBook:
             .with_long_context("openai/gpt-6-sol", 272_000, ModelPrice(4.00, 15.00, 0.40, 5.00))
             .with_price("openai/gpt-6.1-sol", ModelPrice(2.00, 10.00, 0.10, 2.50))
             .with_long_context("openai/gpt-6.1-sol", 272_000, ModelPrice(4.00, 15.00, 0.20, 5.00))
+            .with_price("openai/gpt-6.1-terra", ModelPrice(1.00, 5.00, 0.05, 1.25))
+            .with_long_context("openai/gpt-6.1-terra", 272_000, ModelPrice(2.00, 7.50, 0.10, 2.50))
             .with_price("openai/o1", ModelPrice(15.00, 60.00, 7.50, 15.00))
             #
             # First-party APIs at their default endpoint, read by tokenfuse
