@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "verdryx"
-version = "0.1.0"
+version = "0.2.0"
 description = "Quality-evaluation and drift plane for the TAIPANBOX agent-governance stack"
 readme = "README.md"
 requires-python = ">=3.11"
