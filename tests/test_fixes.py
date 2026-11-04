@@ -332,3 +332,23 @@ def test_an_slo_fix_that_still_breaches_is_failed(tmp_path, capsys) -> None:
         f"trace:n{i}" for i in range(15, 30)
     }
     assert "failed" in capsys.readouterr().out
+
+
+def test_an_slo_fix_whose_interval_still_covers_the_target_stays_pending(tmp_path, capsys) -> None:
+    db, old, finding = _slo_finding_with_fix(tmp_path)
+    new = trace_file(
+        tmp_path,
+        ["case_resolved"] * 56 + ["escalated"] * 4,
+        start_ms=ms(AFTER),
+        name="new.ndjson",
+        prefix="n",
+    )
+    capsys.readouterr()
+
+    _slo(db, old, new)
+
+    after = _only(db)
+    assert after.id == finding.id
+    assert after.status == "fix_pending"
+    assert after.fixes[0].status == "pending"
+    assert "inconclusive" in capsys.readouterr().out

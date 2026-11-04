@@ -93,3 +93,10 @@ Feature: A fix to a finding is judged by the runs that come after it
     And enough runs after the fix, half of which fail
     When verdryx computes the budget
     Then the fix is failed and the finding is open again with the attempt kept
+
+  # @test:test_an_slo_fix_whose_interval_still_covers_the_target_stays_pending
+  Scenario: Runs after an error-budget fix that are below target but not provably so decide nothing
+    Given a finding on an error budget with a fix pending
+    And enough runs after the fix to measure, slightly below the target, with an interval that still covers it
+    When verdryx computes the budget
+    Then the fix stays pending and the output calls the result inconclusive
