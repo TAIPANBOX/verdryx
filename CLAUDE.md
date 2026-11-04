@@ -263,6 +263,29 @@ an absent invariant.
     gate script: a text check on the message builder would not hold the
     property)*
 
+13. **An event log the operator switched on never takes nothing in
+    silence.** `EventLog.emit` skips an event that has no agent id rather
+    than invent one, and counts it; `eval` and `drift` read that count and
+    say on stderr how many events were not written, to which file and why.
+    `drift` also takes the agent id from the run it compares when
+    `--agent-id` is not given, because `eval --agent-id` already stored it:
+    a regression used to print `regressed` and leave the bus empty. The
+    event also names the newest run of the window, not the oldest (`list_runs`
+    is most recent first and `drift` read the end of it). Found
+    2026-11-04 by running `drift` against a real typed run. The skip itself
+    stays (invariant 8's "never fabricate"); only the silence went.
+    The same shape on the other bus line: `slo_burn` carries
+    `burn_events_seen`, the n behind `burn_rate`, because a rate of `0.0`
+    is both "burning nothing" and "never measured" and only the report had
+    a place to say which.
+    *(test: `tests/test_cli.py::test_drift_command_regressed_event_carries_the_agent_the_run_was_stored_with`,
+    `test_drift_command_regressed_with_no_agent_anywhere_says_the_event_was_not_written`,
+    `test_eval_command_with_events_but_no_agent_id_says_nothing_was_written`,
+    `test_drift_command_event_names_the_newest_run_in_the_window_not_the_oldest`,
+    `tests/test_slo.py::test_a_burn_event_carries_the_count_behind_its_rate_so_an_unmeasured_rate_shows`,
+    all run red against the unfixed code first; behavioural, so no gate
+    script: a text check on the emitter would not hold the property)*
+
 ## Decisions that have no gate yet
 
 This list is debt, and it is here to stay visible rather than to be tidy.

@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB.svg)
-![tests](https://img.shields.io/badge/tests-663-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-675-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/phase-1%20(mvp)-success.svg)
 
@@ -232,7 +232,9 @@ report -- including the t-statistic and confidence interval whenever the
 baseline run has at least two scores to compare against (it already loads
 that run to filter by model, so this is free). On `regressed`, and only
 then, it emits a `quality_drift` event (severity `high`) if an event log is
-configured; `on-track` checks are not reported as events.
+configured, under `--agent-id` if one is given and otherwise under the agent
+the newest compared run was evaluated as (`verdryx eval --agent-id` stores it
+with the run), and its `run_id` is that newest run's; `on-track` checks are not reported as events.
 
 ---
 
@@ -263,6 +265,15 @@ verdryx eval typed-cases.json --model stub --db verdryx.db \
   on the command line, which would show up in `ps`.
 - `--typed-template ID` picks which typryx template to ask (default:
   `eval.outcome_met`).
+- `--typed-timeout SECONDS` is how long verdryx waits for each typryx answer
+  (default 30). A model that is slow to load or slow to read a prompt (a local
+  CPU model on a busy machine: 23 s for a cold first answer, 5 to 13 s after
+  it, measured 2026-11-04 on `qwen2.5:7b`) needs more, and typryx's own
+  `TYPRYX_TIMEOUT_MS` should stay below it. Order matters: typryx giving up
+  first comes back as an unanswered case, counted and not scored; verdryx giving
+  up first ends the run, saves nothing and leaves typryx recording the ask as
+  `canceled`. The error says `did not answer within Ns` for a wait that ran
+  out and `could not reach` only for a connection that never happened.
 
 A typed case sends `{"task": case.prompt, "final_answer": output}` as its state
 to typryx, with the template id beside it and, while an eval run is in progress,
@@ -554,6 +565,13 @@ Agent Passport envelope (`taipanbox.dev/agent-event/v0.2`, see the
 | `eval_run` | info | `model`, `cases`, `mean_score`, `total_tokens`, `total_cost_usd`, `unanswered` |
 | `quality_score` | info | `case_id`, `value`, `tokens`, `cost_usd` |
 | `quality_drift` | high | `baseline_id`, `window`, `mean_score`, `delta`, `verdict`, `baseline_n`, `t_statistic`, `ci_low`, `ci_high` |
+| `slo_burn` | high | `sli`, `target`, `observed`, `ci_low`, `ci_high`, `events`, `window`, `budget_remaining`, `burn_rate`, `burn_events_seen`, `trigger`, `identity_field` |
+
+`slo_burn.data.burn_events_seen` (added 2026-11-04) is the number of runs behind
+`burn_rate`. A `burn_rate` of `0.0` with `burn_events_seen` of `0` means the rate
+was never measured (no timestamp on the runs, or too few recent ones), not that
+nothing is burning: the report says so in its blind spots, and a line on the bus
+has none, so the count travels with it.
 
 `eval_run.data.unanswered` (added 2026-09-25) is how many typed cases in the
 run came back unanswered and were counted apart rather than scored -- see
@@ -567,9 +585,13 @@ Same rules as Engram's exporter: **opt-in** (no file, no thread, no
 allocation unless a path is configured), **fail-open** (a write failure is
 logged and swallowed, never raised into the caller's eval/drift call), and
 an event is **skipped** (counted in `EventLog.skipped_empty_agent_id`)
-whenever `agent_id` is empty; Verdryx never fabricates one. Pass
-`--agent-id agent://your-org.example/...` to `eval`/`drift` to identify
-which agent's output is being measured. Each event also carries a SPEC.md
+whenever `agent_id` is empty; Verdryx never fabricates one. A skip is not
+silent: `eval` and `drift` print `warning: N event(s) not written to PATH: no
+agent id (pass --agent-id)` on stderr, so an event log that took nothing does
+not look like one that took everything. Pass
+`--agent-id agent://your-org.example/...` to `eval` to identify which agent's
+output is being measured; `drift` takes the same flag and otherwise uses the
+agent stored with the run it compares. Each event also carries a SPEC.md
 Sec 6.5 `prev_hash` chain (one file, one chain, resumed across restarts);
 verify with `agent-conform -chain <file>`.
 

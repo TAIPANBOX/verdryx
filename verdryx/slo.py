@@ -760,6 +760,10 @@ def burn_events(report: SloReport) -> list[dict[str, Any]]:
                     "window": report.window,
                     "budget_remaining": m.remaining,
                     "burn_rate": m.burn_rate,
+                    # The n behind the rate. 0.0 is both "burning nothing" and
+                    # "no clock, never measured", and the report separates the
+                    # two in its blind spots, which a bus line does not have.
+                    "burn_events_seen": m.burn_events_seen,
                     "trigger": m.trigger,
                     "identity_field": report.identity_field,
                     "_subject": m.subject,

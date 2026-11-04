@@ -5,7 +5,7 @@ Usage::
     verdryx eval <evalset.json> --model MODEL [--db PATH] [--events PATH]
                                  [--agent-id ID]
                                  [--typed-url URL [--typed-key-file PATH]
-                                  [--typed-template ID]]
+                                  [--typed-template ID] [--typed-timeout SECONDS]]
     verdryx baseline <run_id> [--db PATH] [--label LABEL]
     verdryx drift --baseline ID [--db PATH] [--window N] [--threshold F]
                    [--events PATH] [--agent-id ID]
@@ -35,6 +35,7 @@ graders.TypedGrader for what a typed case sends and gets back.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 import uuid
@@ -96,6 +97,34 @@ def _otlp_from_config(config: Config) -> OTLPExporter | None:
     return OTLPExporter(config.otlp_endpoint) if config.otlp_endpoint else None
 
 
+def _report_unwritten_events(events: EventLog | None) -> None:
+    """Say so when an event log the operator switched on took nothing.
+
+    `EventLog.emit` skips an event that has no agent id rather than invent
+    one, and counts it. That count was read by no command, so `--events` with
+    no agent id wrote an empty bus and printed a normal-looking report: a
+    regression went unannounced. The skip is still right, the silence is not.
+    On stderr, so a script reading the report is not disturbed.
+    """
+    if events is not None and events.skipped_empty_agent_id:
+        print(
+            f"warning: {events.skipped_empty_agent_id} event(s) not written to {events.path}: "
+            "no agent id (pass --agent-id)",
+            file=sys.stderr,
+        )
+
+
+def _positive_seconds(text: str) -> float:
+    """argparse type for a wait in seconds: a finite number above zero."""
+    try:
+        value = float(text)
+    except ValueError:
+        value = float("nan")
+    if not (math.isfinite(value) and value > 0):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a positive number of seconds")
+    return value
+
+
 def _build_typed_client(args: argparse.Namespace, config: Config) -> TypryxClient | None:
     """`--typed-url` is the only thing that constructs a TypryxClient: no
     environment variable enables the typed grader on its own (CLAUDE.md
@@ -119,6 +148,8 @@ def _build_typed_client(args: argparse.Namespace, config: Config) -> TypryxClien
         kwargs: dict[str, Any] = {}
         if args.typed_template:
             kwargs["template"] = args.typed_template
+        if args.typed_timeout is not None:
+            kwargs["timeout"] = args.typed_timeout
         return TypryxClient(args.typed_url, key, **kwargs)
     return None
 
@@ -345,6 +376,7 @@ def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
             },
             run_id=run.id,
         )
+        _report_unwritten_events(events)
 
     otlp = _otlp_from_config(config)
     if otlp is not None:
@@ -449,6 +481,14 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
         recent = store.list_runs(model=baseline_run.model, limit=args.window)
         if not recent:
             _die("no eval runs found to compare against the baseline")
+        # `list_runs` is most recent first, so the run this check is about, the
+        # one that just ran, is the head of the window. It was read off the end,
+        # which named the OLDEST run of a window wider than one.
+        newest = recent[0]
+        # Whose drift this is. `--agent-id` wins; without it the agent the
+        # newest run was evaluated as, which `verdryx eval --agent-id` already
+        # stored. Never taken from anywhere else (see EventLog.emit).
+        agent_id = args.agent_id or newest.agent_id
 
         try:
             report = compute_drift(
@@ -484,7 +524,7 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
         if events is not None:
             events.emit(
                 "quality_drift",
-                args.agent_id,
+                agent_id,
                 {
                     "baseline_id": report.baseline_id,
                     "window": report.window,
@@ -496,8 +536,9 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
                     "ci_low": report.ci_low,
                     "ci_high": report.ci_high,
                 },
-                run_id=recent[-1].id,
+                run_id=newest.id,
             )
+            _report_unwritten_events(events)
 
     # Exported for every check regardless of verdict, unlike the governance-
     # alert quality_drift event above: a trace collector needs the full
@@ -507,8 +548,8 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
         otlp.export(
             Span(
                 name="quality_drift",
-                run_id=recent[-1].id,
-                agent_id=args.agent_id,
+                run_id=newest.id,
+                agent_id=agent_id,
                 attributes={
                     "baseline_id": report.baseline_id,
                     "window": report.window,
@@ -763,6 +804,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="ID",
         help="typryx template id to ask (default: eval.outcome_met)",
+    )
+    p_eval.add_argument(
+        "--typed-timeout",
+        type=_positive_seconds,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "how long to wait for each typryx answer (default: 30); a model that is slow to "
+            "load needs more, and typryx's own TYPRYX_TIMEOUT_MS should stay below it"
+        ),
     )
 
     p_baseline = sub.add_parser(
