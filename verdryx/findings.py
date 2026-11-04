@@ -57,6 +57,7 @@ from verdryx.models import (
     STATUS_FIX_PENDING,
     STATUS_OPEN,
     Baseline,
+    DriftReport,
     EvalRun,
     Finding,
     Fix,
@@ -400,8 +401,14 @@ def process_drift(
     agent_id: str | None,
     now: datetime,
     rng: random.Random | None = None,
+    report: DriftReport | None = None,
 ) -> list[str]:
     """Record, refresh, close or reopen the finding for a drift check.
+
+    `report` is the verdict the CLI already printed for the whole window. It is
+    reused when no fix has cut any run out of that window, so the finding and
+    the printed verdict cannot disagree on a bootstrap interval that sits at
+    zero; with runs cut out it is a different set of runs and is computed fresh.
 
     Returns the lines the CLI prints. See the module docstring for the rules:
     one finding per key, a fix decided only by runs after it, a verified fix
@@ -445,7 +452,10 @@ def process_drift(
 
     if not usable:
         return lines
-    draft = _drift_finding(key, agent_id, usable, baseline, baseline_run, threshold, now, rng)
+    same_window = report if len(usable) == len(recent) else None
+    draft = _drift_finding(
+        key, agent_id, usable, baseline, baseline_run, threshold, now, rng, same_window
+    )
     if draft is None:
         return lines
     finding, is_new = _upsert(store, draft)
@@ -463,17 +473,20 @@ def _drift_finding(
     threshold: float,
     now: datetime,
     rng: random.Random | None,
+    precomputed: DriftReport | None = None,
 ) -> Finding | None:
     """A draft finding for `runs` against `baseline`, or None when they are not
     regressed (or hold no scored case, so there is nothing to say)."""
     if not runs:
         return None
-    try:
-        report = compute_drift(
-            runs, baseline, threshold=threshold, baseline_run=baseline_run, rng=rng
-        )
-    except ValueError:
-        return None
+    report = precomputed
+    if report is None:
+        try:
+            report = compute_drift(
+                runs, baseline, threshold=threshold, baseline_run=baseline_run, rng=rng
+            )
+        except ValueError:
+            return None
     if report.verdict != "regressed":
         return None
     examined = list(runs) + ([baseline_run] if baseline_run is not None else [])

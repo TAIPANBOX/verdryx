@@ -549,6 +549,7 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
                 threshold=args.threshold,
                 agent_id=agent_id,
                 now=datetime.now(tz=UTC),
+                report=report,
             )
         except ValueError as e:
             # compute_drift pools Scores per CASE across the window, so a

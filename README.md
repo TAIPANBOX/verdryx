@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB.svg)
-![tests](https://img.shields.io/badge/tests-675-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-739-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/phase-1%20(mvp)-success.svg)
 
@@ -14,8 +14,8 @@
 
 </div>
 
-Line coverage of the `verdryx` package: **97%** (`1510/1556` statements).
-`@measured .venv/bin/pytest --cov=verdryx --cov-report=term-missing 2026-09-25`.
+Line coverage of the `verdryx` package: **98%** (`2164/2211` statements).
+`@measured pytest --cov=verdryx --cov-report=term-missing 2026-11-04` (python 3.11 on forge, as CI).
 Unlike the tests badge above, this figure is not gated (see CLAUDE.md invariant
 11): recomputing it inside a gate would mean running the full suite inside a
 gate, which is what the other gates already run once per CI job, so it is
@@ -151,6 +151,8 @@ asks for without special-casing.
 | **Six graders** | `verdryx/graders.py`: exact match, regex match, a `tokenfuse x-fuse-outcome` tag lookup, an LLM-judged rubric, tool-call accuracy (which tools, in what order), and a typed verdict from typryx (an optional, separate service), opt-in via `--typed-url` |
 | **Baselines and drift** | `verdryx/drift.py`: snapshot an `EvalRun`'s mean score as a `Baseline`, then compare a window of later runs against it |
 | **Cost per outcome** | `verdryx/costper.py`: given a flat export of `{outcome, cost_usd}` records, computes cost-per-resolved-case, cost-per-escalated, cost-per-abandoned, and overall |
+| **Findings and fixes** | `verdryx/findings.py`: a drift regression or an established error-budget breach becomes a finding (agent, window, kind, evidence, suspect), a registered fix is verified or failed by the runs after it, `verdryx findings list/show/fix`; no model, no new event type |
+| **Human grades** | `verdryx grade`, `verdryx principal`: a reviewer's grade outweighs the model's in the mean, drift and the quality floor, carries its author, and is written through one door an uploader cannot use |
 | **Opt-in event log** | `verdryx/events.py`: an NDJSON writer for the shared TAIPANBOX Agent Passport event envelope (schema `taipanbox.dev/agent-event/v0.2`, `source: "verdryx"`), so `eval_run`, `quality_score`, and `quality_drift` events reach the rest of the governance stack |
 | **Opt-in OTLP export** | `verdryx/otel.py`: a hand-rolled OTLP/HTTP-JSON span per `eval`/`drift` run to `VERDRYX_OTLP_ENDPOINT`, so a trace collector (Grafana/Datadog/Honeycomb) sees eval/drift activity regardless of verdict |
 
@@ -458,6 +460,93 @@ quietly mean four unmeasured ones.
 The design, the arguments behind each default, and the bug we shipped for an
 afternoon are written up in [docs/agent-slos.md](docs/agent-slos.md).
 
+## Findings, fixes and human grades
+
+`drift` and `slo` used to print a verdict and forget it. A failure they see is
+now written down as a **finding**, a fix can be registered against it, and a
+person can grade a case in a way the model's score cannot overrule. None of it
+calls a model, and none of it adds an event to the bus: findings are tables in
+the same SQLite store the console already reads.
+
+### A failure becomes a finding
+
+```sh
+verdryx drift --baseline "$BASELINE" --db quality.db
+verdryx slo --traces "$TOKENFUSE_DATA_DIR" --scores-db quality.db --db quality.db
+verdryx findings list --db quality.db
+verdryx findings show 3f2a9c1d --db quality.db
+```
+
+A finding names the **agent**, the **window** it was seen over, the **kind** of
+failure (`drift`, `slo_exhausted` or `slo_fast_burn`, with the indicator for the
+last two), the **evidence** (run ids: `eval:<run>` for a stored run,
+`eval:<run>:<case>` for the lowest scoring cases, `trace:<run_id>` for the
+gateway runs that failed an indicator), the numbers (delta and interval for
+drift, observed ratio, interval, budget and burn for an indicator), and the
+**suspect**: the latest change of model or version across the runs examined.
+Label a run with `verdryx eval --agent-version v7` and the suspect can name it.
+The suspect always says which of three things it is: a change (from what to
+what, at which run), no change across N runs, or too few runs to compare. The
+last two are different facts and the finding never reports one as the other.
+
+The same failure seen again is the same finding, seen again (`seen 2x`), not a
+second one, so a routine that runs every night does not fill the list. A
+regression with no agent id is kept and listed as `(no agent id)`. `slo` records
+a breach only when the interval shows it (the bar the bus already uses), only
+for a subject that is an agent, and only when given `--db`; without it, an
+established breach is reported as not recorded and says how to record it.
+
+### A fix is judged by the runs after it
+
+```sh
+verdryx findings fix 3f2a9c1d --note "restored the terse prompt" --version v4 --db quality.db
+verdryx eval cases.json --model "$MODEL" --db quality.db --agent-id "$AGENT" --agent-version v4
+verdryx drift --baseline "$BASELINE" --db quality.db
+```
+
+The next `drift` (or `slo`) decides the fix, from the runs that started after it
+was registered:
+
+| Outcome | What happened | The finding |
+|---|---|---|
+| `verified` | measured, and the failure is gone | closed, with a closing time |
+| `failed` | measured, and it is still there | open again, the attempt kept on its record with its numbers |
+| `pending` | not decided: no run since, too few runs to measure, runs of another version than the one the fix names, or an interval that still covers the target | stays `fix_pending`, with the reason |
+
+A fix is never `verified` for want of data: an unmeasured indicator is not a
+pass. Runs from before the fix are the ones it was written against, so they
+neither verify it nor undo it: a window of five runs that still holds four old
+regressed ones can be `regressed` on its own terms while the one run after the
+fix is what decides it, and a closed finding is not reopened by the runs it was
+closed over. The same failure after a verified fix is a new finding.
+
+### A person's grade outweighs the model's
+
+```sh
+verdryx principal add alice --role reviewer --key-out alice.key --db quality.db
+verdryx principal add ingest-bot --role uploader --key-out ingest.key --db quality.db
+verdryx grade "$RUN" q03 0.0 --author alice --key-file alice.key \
+    --note "right answer, unusable in the product" --db quality.db
+```
+
+A grade replaces the model's value in the run's mean, in drift and in the error
+budget's quality floor, and the model's own value stays beside it. A later
+grade of the same case replaces the earlier one in every figure, and both stay
+on record with their authors. Every grade carries its **author**, a registered
+principal whose key `principal add` generated, wrote once to a file only its
+owner can read, and kept as a hash. The role `reviewer` can grade; the role
+`uploader` is for whatever only puts results in, and it can never grade,
+whatever it presents. `verdryx eval` needs no credential and has no path to a
+grade at all (`scripts/human-grades-have-one-door.sh` reads the package for a
+second one). A case the model gave no answer for has no score to outweigh and
+cannot be graded into existence.
+
+The store file is the trust boundary: this separates two credentials and
+attributes every grade, and anyone who can write the SQLite file can write
+anything in it. If a reviewer regrades the run a baseline was snapshotted from,
+`drift` says so on stderr and compares against the snapshot, so set a new
+baseline to compare against the graded run.
+
 ## Cost per outcome
 
 <div align="center">
@@ -638,6 +727,7 @@ Read once, at process start, into `verdryx.config.Config`:
 | `ANTHROPIC_API_KEY` | API key for the real `AnthropicAdapter` |
 | `ANTHROPIC_BASE_URL` | Proxy endpoint (e.g. TokenFuse) for the real `AnthropicAdapter` |
 | `VERDRYX_TYPRYX_KEY_FILE` | Fallback path to a file holding the typryx credential, used only when `--typed-key-file` is not given; never the key itself (default: unset) |
+| `VERDRYX_REVIEWER_KEY_FILE` | Fallback path to the reviewer's key file for `verdryx grade`, used only when `--key-file` is not given; never the key itself (default: unset) |
 
 CLI flags (`--db`, `--events`, `--typed-key-file`) always take precedence
 over the environment. `--typed-url` has no environment-variable equivalent
@@ -788,6 +878,10 @@ slipping?
 - [x] Statistically-aware drift verdict (confidence intervals / significance testing) beyond the flat threshold
 - [x] Reproduce tokenfuse-core's `compute_outcomes` aggregation inside `read_parquet` (`_reduce_call_rows`): last non-empty outcome tag per run wins (ordered by `run_id`/`step`), every call's cost folds into its run's bucket, a never-tagged run reports under `UNTAGGED`, and a Breaker-blocked call is counted but excluded from cost
 - [x] OTLP exporter (`verdryx.otel`): a span per `eval`/`drift` run to `VERDRYX_OTLP_ENDPOINT`, hand-rolled OTLP/HTTP-JSON (stdlib `urllib`, no OTel SDK), mirroring Wardryx's own exporter; unlike a long-lived server, a one-shot CLI process must join its background export thread before exiting (`OTLPExporter.wait`) or the span is silently dropped almost every time -- caught by a live end-to-end run against a real local collector, not just reasoned about
+
+- [x] Findings (`verdryx findings`): a drift regression or an established error-budget breach is written down with its agent, window, kind, evidence and suspect model or version; one failure seen again is one finding; computed from the stores alone
+- [x] Fix verification: a fix registered against a finding is verified (finding closed), failed (finding reopened with the attempt kept) or left pending with its reason, by the runs that came after it
+- [x] Human grades (`verdryx grade`, `verdryx principal`): a reviewer's grade outweighs the model's in the run mean, drift and the quality floor, carries its author, and is written through one door checked by `scripts/human-grades-have-one-door.sh`
 
 ## License
 
