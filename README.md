@@ -58,7 +58,10 @@ flowchart TB
   VCX ==>|"delegation_issued / denied / revoked"| BUS
   TF ==>|"agent-event NDJSON"| BUS{{"agent-event bus + Agent Passport"}}
   WX ==> BUS
-  Agent -->|"web fetch"| SCX["Scopyx: governed web egress"]
+  Agent -->|"web fetch: MCP tools/call"| BRK["TokenFuse MCP broker: the scopyx key from its vault, the run labelled from the act"]
+  BRK -->|"last hop"| SCX["Scopyx: governed web egress"]
+  BRK -->|"observed act"| TF
+  Agent -.->|"or direct, key in a header"| SCX
   SCX -->|"POST /v1/decide"| WX
   SCX ==>|"web_fetch / web_blocked"| BUS
   ENG["Engram: memory"] -->|"reflect via base_url"| TF
@@ -69,6 +72,7 @@ flowchart TB
   QX ==>|"crypto events"| BUS
   BUS ==> VX["Verdryx: quality / drift"]
   VX ==>|"quality events"| BUS
+  VX ==>|"slo_burn: a policy can hold the agent"| WX
   TF -->|"outcome-tagged traces"| VX
   MX["Mockryx: pre-prod safety rehearsal"] -->|"hostile scenarios"| TF
   MX ==>|"sim events"| BUS
@@ -79,7 +83,7 @@ flowchart TB
   HX -->|"one mail, a view and never an action"| OPS["your mailbox"]
   HX ==>|"alert_sent"| HJ[("heraldyx's own hash-chained journal, not this bus")]
   YOU(["you, in a browser over your own tunnel"]) --> GX[["Genaryx: the console over all of it"]]
-  GX -->|"signed commands: the kill, an approval, a policy"| CL
+  GX -->|"commands: the kill, an approval, a policy"| CL
   GX -->|"signed commands"| WX
   GX ==>|"console_command"| BUS
   GX -.->|"reads it"| IDX
@@ -101,7 +105,7 @@ flowchart TB
 
 - **Consumes**: outcome-tagged traces and records exported by **TokenFuse** (via `tokenfuse outcomes --json` or Parquet traces).
 - **Produces**: cost-per-correct metrics, quality scores, drift reports, and `source: verdryx` events.
-- **Talks to**: **TokenFuse** (its LLM judge can route through TokenFuse via `base_url`, and TokenFuse is the source of the traces Verdryx scores).
+- **Talks to**: **TokenFuse** (its LLM judge can route through TokenFuse via `base_url`, and TokenFuse is the source of the traces Verdryx scores); **Wardryx** reads the `slo_burn` events in this plane's event file when `WARDRYX_SIGNAL_EVENTS` names it (Wardryx 2.5.0), and a policy of Wardryx's own can hold the agent's tool calls for a person while its error budget is spent.
 
 The full stack is TokenFuse (spend), Wardryx (policy), Vouchryx (delegation), Engram (memory), Idryx (access), Qryx (crypto), Verdryx (quality), Mockryx (pre-prod), scopyx (governed web egress), CostCrew (the bill), Trailryx (the record) and heraldyx (the mail out), on the shared Agent Passport + agent-event contract (agent-stack-go / agent-passport), configured via terraform-provider-taipan and driven from Genaryx, the console over all of it.
 
@@ -447,7 +451,11 @@ being less identified.
 It measures. It does not enforce: no policy is written, no agent is demoted,
 and there is no autonomy tier in this stack to demote one into. The reasons
 that is the honest shape rather than an unfinished one are in invariant 9 of
-CLAUDE.md.
+CLAUDE.md. What a deployment adds on top is Wardryx's: it can read the
+`slo_burn` events this writes (`WARDRYX_SIGNAL_EVENTS`, off unless set) and a
+policy of its own that reads the signal can hold the agent's tool calls for a
+person while the budget is spent. That decision is Wardryx's, under its own
+policy; this plane still writes no policy and holds nothing.
 
 Three things it will not do, each on purpose. It sends no event unless the
 confidence interval's upper bound sits below the objective, so a shortfall
@@ -853,7 +861,7 @@ Verdryx is one plane of the TAIPANBOX agent-governance stack, alongside
 [Engram](https://github.com/TAIPANBOX/engram) (memory), TokenFuse (spend
 governance), [Idryx](https://github.com/TAIPANBOX/idryx) (identity),
 [Qryx](https://github.com/TAIPANBOX/qryx) (cryptographic evidence),
-[Wardryx](https://github.com/TAIPANBOX/wardryx) (policy decisions), and
+[Wardryx](https://github.com/TAIPANBOX/wardryx) (policy decisions, which can read this plane's `slo_burn` events), and
 [Mockryx](https://github.com/TAIPANBOX/mockryx) (pre-production safety
 rehearsal). Each product is complete alone; the stack shares one identifier format
 (`agent://...`) and one event envelope, defined in the
