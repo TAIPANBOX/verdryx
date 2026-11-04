@@ -1658,7 +1658,16 @@ def test_drift_command_event_names_the_newest_run_in_the_window_not_the_oldest(
     newer = "agent://acme-bank.example/support/newer-bot"
     for who in (older, newer):
         main(
-            ["eval", str(sample_evalset_path), "--model", "stub", "--db", str(db), "--agent-id", who]
+            [
+                "eval",
+                str(sample_evalset_path),
+                "--model",
+                "stub",
+                "--db",
+                str(db),
+                "--agent-id",
+                who,
+            ]
         )
     with Store.open(db) as store:
         newest_run, oldest_run = store.list_runs()[0], store.list_runs()[1]
