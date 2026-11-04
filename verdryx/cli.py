@@ -15,6 +15,10 @@ Usage::
     verdryx findings list [--db PATH] [--status open|closed|all] [--agent-id ID]
     verdryx findings show <id-or-prefix> [--db PATH]
     verdryx findings fix <id-or-prefix> --note TEXT [--version V] [--db PATH]
+    verdryx grade <run_id> <case_id> <value> --author NAME [--key-file PATH]
+                   [--note TEXT] [--db PATH]
+    verdryx principal add NAME --role reviewer|uploader --key-out PATH [--db PATH]
+    verdryx principal list [--db PATH]
     verdryx version
 
 `--model stub` (eval) selects StubLLMAdapter instead of a real Anthropic
@@ -39,11 +43,13 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sys
 import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, NoReturn
 
 from verdryx import findings as findings_mod
@@ -66,6 +72,7 @@ from verdryx.graders import (
 )
 from verdryx.models import (
     FINDING_STATUSES,
+    ROLES,
     STATUS_CLOSED,
     STATUS_FIX_PENDING,
     STATUS_OPEN,
@@ -77,7 +84,7 @@ from verdryx.models import (
     Unanswered,
 )
 from verdryx.otel import OTLPExporter, Span
-from verdryx.store import Store
+from verdryx.store import GradeError, PrincipalError, Store, new_key
 
 # ------------------------------------------------------------------
 # Helpers
@@ -171,9 +178,10 @@ def _build_typed_client(args: argparse.Namespace, config: Config) -> TypryxClien
 
 def _read_key_file(path: str) -> str:
     """Read and strip a credential file. A dedicated function, not an
-    inline `.read_text().strip()`, so the one place this repo reads a
-    typryx key from disk is easy to find and audit, mirroring how
-    TypryxClient is the one place it is sent over the wire."""
+    inline `.read_text().strip()`, so the one place this repo reads a key
+    from disk (typryx's, or a reviewer's) is easy to find and audit,
+    mirroring how TypryxClient is the one place the first is sent over the
+    wire."""
     with open(path, encoding="utf-8") as f:
         return f.read().strip()
 
@@ -502,6 +510,18 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
                 "refusing to compare against an unfiltered pool of runs across "
                 "every model"
             )
+        if baseline_run.human_graded and abs(baseline_run.mean_score - baseline.mean_score) > 1e-9:
+            # The baseline is a snapshot, deliberately (models.Baseline), and a
+            # person has graded cases of its run since. Said, not silently
+            # resolved either way: the delta below is against the snapshot.
+            print(
+                f"warning: baseline {baseline.id} was set at a mean of {baseline.mean_score:.3f} "
+                f"but its run now reads {baseline_run.mean_score:.3f} "
+                f"({baseline_run.human_graded} case(s) graded by a person since); the delta "
+                f"below is taken against the snapshot. Set a new baseline "
+                f"(verdryx baseline {baseline_run.id}) to compare against the graded run",
+                file=sys.stderr,
+            )
         recent = store.list_runs(model=baseline_run.model, limit=args.window)
         if not recent:
             _die("no eval runs found to compare against the baseline")
@@ -547,6 +567,12 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
     print(f"  mean score: {report.mean_score:.3f}")
     print(f"  baseline:   {baseline.mean_score:.3f}")
     print(f"  delta:      {report.delta:+.3f}")
+    graded = sum(r.human_graded for r in recent)
+    if graded:
+        cases = sum(len(r.scores) for r in recent)
+        print(
+            f"  human grades: {graded} of {cases} cases graded by a person (they outweigh the model)"
+        )
     if report.baseline_n:
         t_display = f"{report.t_statistic:.2f}" if report.t_statistic is not None else "n/a"
         print(f"  t-statistic: {t_display}  (n={report.baseline_n} baseline cases)")
@@ -896,6 +922,76 @@ def _cmd_findings(args: argparse.Namespace, config: Config) -> None:
     print(f"\nFix {fix.id[:8]} registered for finding {finding_id[:8]}: the next run decides it\n")
 
 
+def _cmd_grade(args: argparse.Namespace, config: Config) -> None:
+    key_file = args.key_file or config.reviewer_key_file
+    if not key_file:
+        _die(
+            "no credential: pass --key-file PATH or set $VERDRYX_REVIEWER_KEY_FILE to the file "
+            "`verdryx principal add` wrote for this reviewer. The key is never accepted on "
+            "the command line, which would show in `ps`."
+        )
+    try:
+        key = _read_key_file(key_file)
+    except OSError as e:
+        _die(f"--key-file {key_file!r}: cannot read: {e}")
+    db_path = args.db or config.db_path
+    with Store.open(db_path) as store:
+        try:
+            grade = store.add_human_grade(
+                args.run_id,
+                args.case_id,
+                args.value,
+                author=args.author,
+                key=key,
+                note=args.note or "",
+            )
+        except GradeError as e:
+            _die(str(e))
+    print(
+        f"\nGraded {grade.case_id} of run {grade.run_id} as {grade.value:.2f} "
+        f"(author {grade.author}); it now outweighs the model's score\n"
+    )
+
+
+def _cmd_principal(args: argparse.Namespace, config: Config) -> None:
+    if args.principal_cmd is None:
+        print("usage: verdryx principal {add,list} ...", file=sys.stderr)
+        sys.exit(1)
+    db_path = args.db or config.db_path
+    with Store.open(db_path) as store:
+        if args.principal_cmd == "list":
+            print(f"\nPrincipals -- {db_path}\n")
+            for p in store.list_principals():
+                print(
+                    f"  {p.name:<24} {p.role:<9} registered {p.created_at.isoformat(timespec='seconds')}"
+                )
+            print()
+            return
+        key = new_key()
+        path = Path(args.key_out)
+        # Created exclusively and readable by its owner only, BEFORE the
+        # principal is registered: a path that already holds something is
+        # refused rather than overwritten, and a name already taken removes
+        # the file this call just wrote.
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            _die(f"{path} already exists: refusing to overwrite a key file")
+        except OSError as e:
+            _die(f"cannot write the key to {path}: {e}")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(key + "\n")
+        try:
+            store.add_principal(args.name, args.role, key)
+        except PrincipalError as e:
+            path.unlink(missing_ok=True)
+            _die(str(e))
+    print(
+        f"\nPrincipal {args.name} ({args.role}) registered. Its key is in {path} and nowhere "
+        "else: the store holds only a hash of it\n"
+    )
+
+
 def _get_version() -> str:
     try:
         from verdryx import __version__
@@ -1164,6 +1260,49 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_f_fix.add_argument("--db", default=None, metavar="PATH")
 
+    p_grade = sub.add_parser(
+        "grade", help="a reviewer's grade of one case; it outweighs the model's score"
+    )
+    p_grade.add_argument("run_id", help="the eval run the case belongs to")
+    p_grade.add_argument("case_id", help="the case to grade")
+    p_grade.add_argument("value", type=float, help="the grade, 0 to 1")
+    p_grade.add_argument("--author", required=True, metavar="NAME", help="the reviewer's name")
+    p_grade.add_argument(
+        "--key-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "file holding the reviewer's key (default: $VERDRYX_REVIEWER_KEY_FILE); "
+            "never accepted on the command line, which would show in `ps`"
+        ),
+    )
+    p_grade.add_argument("--note", default=None, metavar="TEXT", help="why, in a few words")
+    p_grade.add_argument("--db", default=None, metavar="PATH")
+
+    p_principal = sub.add_parser(
+        "principal", help="register who may write into the store besides a run"
+    )
+    principal_sub = p_principal.add_subparsers(dest="principal_cmd")
+    p_p_add = principal_sub.add_parser(
+        "add", help="register a name with a role; writes its generated key to a new file, once"
+    )
+    p_p_add.add_argument("name", help="the name grades will carry as their author")
+    p_p_add.add_argument(
+        "--role",
+        required=True,
+        choices=list(ROLES),
+        help="reviewer can grade cases; uploader only puts results in and can never grade",
+    )
+    p_p_add.add_argument(
+        "--key-out",
+        required=True,
+        metavar="PATH",
+        help="where to write the new key (created, mode 0600; an existing file is refused)",
+    )
+    p_p_add.add_argument("--db", default=None, metavar="PATH")
+    p_p_list = principal_sub.add_parser("list", help="the registered principals")
+    p_p_list.add_argument("--db", default=None, metavar="PATH")
+
     sub.add_parser("version", help="print the verdryx version")
 
     return parser
@@ -1180,6 +1319,8 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace, Config], None]] = {
     "cost-per-correct": _cmd_cost_per_correct,
     "slo": _cmd_slo,
     "findings": _cmd_findings,
+    "grade": _cmd_grade,
+    "principal": _cmd_principal,
     "version": _cmd_version,
 }
 

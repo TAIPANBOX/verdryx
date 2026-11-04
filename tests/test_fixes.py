@@ -225,7 +225,9 @@ def test_a_run_of_another_version_does_not_test_a_fix_that_names_one(tmp_path, c
     assert _only(db).fixes[0].status == "pending"
     assert "none of version 'v2'" in out
 
-    _save(db, make_run(good(), started=AFTER + timedelta(hours=1), run_id="new-build", version="v2"))
+    _save(
+        db, make_run(good(), started=AFTER + timedelta(hours=1), run_id="new-build", version="v2")
+    )
     _drift(db)
     after = _only(db)
     assert after.fixes[0].status == "verified"
@@ -258,7 +260,10 @@ def _slo(db: Path, *files: Path) -> None:
 
 def _slo_finding_with_fix(tmp_path: Path) -> tuple[Path, Path, Any]:
     old = trace_file(
-        tmp_path, ["case_resolved"] * 20 + ["escalated"] * 20, start_ms=ms(BEFORE), name="old.ndjson"
+        tmp_path,
+        ["case_resolved"] * 20 + ["escalated"] * 20,
+        start_ms=ms(BEFORE),
+        name="old.ndjson",
     )
     db = tmp_path / "store.db"
     _slo(db, old)

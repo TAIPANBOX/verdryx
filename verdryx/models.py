@@ -680,3 +680,40 @@ class Finding:
     suspect_note: str
     closed_at: datetime | None = None
     fixes: list[Fix] = field(default_factory=list)
+
+
+# ------------------------------------------------------------------
+# People who may write into the store
+# ------------------------------------------------------------------
+
+#: A `reviewer` can write a human grade. An `uploader` is a principal that only
+#: puts results in and holds a key to say so: it can never grade, whatever it
+#: presents. A name that is not registered at all can do neither.
+ROLE_REVIEWER = "reviewer"
+ROLE_UPLOADER = "uploader"
+ROLES = (ROLE_REVIEWER, ROLE_UPLOADER)
+
+
+@dataclass(frozen=True)
+class Principal:
+    """A registered name with a role. The key itself is never held, only its hash."""
+
+    name: str
+    role: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class HumanGrade:
+    """One person's grade of one case, kept with who gave it and when.
+
+    A case can carry several, oldest first; the newest is the one the run's
+    mean, drift and the error budget read, and the older ones stay on record.
+    """
+
+    run_id: str
+    case_id: str
+    value: float
+    author: str
+    created_at: datetime
+    note: str = ""

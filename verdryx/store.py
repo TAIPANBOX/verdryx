@@ -9,19 +9,28 @@ as Engram's schema.py).
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import math
+import re
+import secrets
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from verdryx.models import (
+    ROLE_REVIEWER,
+    ROLES,
     STATUS_FIX_PENDING,
     STATUS_OPEN,
     Baseline,
     EvalRun,
     Finding,
     Fix,
+    HumanGrade,
+    Principal,
     Score,
     Unanswered,
 )
@@ -114,6 +123,31 @@ CREATE TABLE IF NOT EXISTS fixes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fixes_finding_id ON fixes(finding_id);
+
+-- Who may write into the store besides a run: a name, a role and the SHA-256
+-- of a key that was generated here and shown once. Never the key.
+CREATE TABLE IF NOT EXISTS principals (
+    name          TEXT PRIMARY KEY,
+    role          TEXT NOT NULL,
+    key_sha256    TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
+-- A person's grade of a case (models.HumanGrade). Append-only: a second grade
+-- of the same case is a new row, the newest wins, the older stay on record.
+-- The ONLY writer is Store.add_human_grade, held by
+-- scripts/human-grades-have-one-door.sh.
+CREATE TABLE IF NOT EXISTS human_grades (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL REFERENCES eval_runs(id),
+    case_id       TEXT NOT NULL,
+    value         REAL NOT NULL,
+    author        TEXT NOT NULL REFERENCES principals(name),
+    created_at    TEXT NOT NULL,
+    note          TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_human_grades_run_case ON human_grades(run_id, case_id);
 """
 
 
@@ -271,6 +305,30 @@ def _configure_connection(conn: sqlite3.Connection, path: str) -> None:
     conn.execute("PRAGMA temp_store=MEMORY")
 
 
+class GradeError(ValueError):
+    """A human grade that cannot be written, with the reason in the message."""
+
+
+class PrincipalError(ValueError):
+    """A principal that cannot be registered, with the reason in the message."""
+
+
+_PRINCIPAL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$")
+
+
+def new_key() -> str:
+    """A fresh credential: 256 random bits, URL-safe. Generated, never chosen,
+    so a weak one cannot be registered."""
+    return secrets.token_urlsafe(32)
+
+
+def hash_key(key: str) -> str:
+    """What the store keeps of a key. SHA-256 is enough for a 256-bit random
+    secret; a slow KDF would only matter for a guessable one, and this module
+    never accepts one."""
+    return hashlib.sha256(key.strip().encode("utf-8")).hexdigest()
+
+
 class Store:
     """Thin wrapper around a sqlite3 connection providing eval-run persistence."""
 
@@ -370,9 +428,24 @@ class Store:
             "SELECT case_id, value, tokens, cost_usd FROM scores WHERE run_id = ? ORDER BY id",
             (row["id"],),
         ).fetchall()
+        # A person's newest grade of a case replaces the model's value in the
+        # score the rest of verdryx reads (mean, drift, the budget), and the
+        # model's own value rides along as `model_value`: outweighed, not lost.
+        human = {
+            g["case_id"]: (g["value"], g["author"])
+            for g in self._conn.execute(
+                "SELECT case_id, value, author FROM human_grades WHERE run_id = ? ORDER BY id",
+                (row["id"],),
+            )
+        }
         scores = [
             Score(
-                case_id=r["case_id"], value=r["value"], tokens=r["tokens"], cost_usd=r["cost_usd"]
+                case_id=r["case_id"],
+                value=human[r["case_id"]][0] if r["case_id"] in human else r["value"],
+                tokens=r["tokens"],
+                cost_usd=r["cost_usd"],
+                graded_by=human[r["case_id"]][1] if r["case_id"] in human else None,
+                model_value=r["value"] if r["case_id"] in human else None,
             )
             for r in score_rows
         ]
@@ -409,6 +482,10 @@ class Store:
     def score_records(self) -> list[dict[str, Any]]:
         """Every stored score, under the subject of the run that produced it.
 
+        A case a person has graded carries the NEWEST human value, not the
+        model's (the same precedence `_hydrate_run` applies), so the quality
+        floor is computed over what a person said where one said anything.
+
         Shaped for `slo.compute_slo(scores=...)`, which is the only consumer,
         and the shape is a documented coupling rather than an accident: it is
         one SQL join, and doing it in the CLI would mean hydrating every run
@@ -437,10 +514,14 @@ class Store:
         milliseconds, which is what makes that answerable at all.
         """
         rows: list[Any] = self._conn.execute(
-            "SELECT r.agent_id AS agent_id, s.value AS value, "
+            "SELECT r.agent_id AS agent_id, COALESCE(h.value, s.value) AS value, "
+            "       h.author AS graded_by, "
             "       r.id AS run_id, s.case_id AS case_id, "
             "       r.finished_at AS finished_at, r.started_at AS started_at "
             "FROM scores s JOIN eval_runs r ON s.run_id = r.id "
+            "LEFT JOIN human_grades h ON h.run_id = s.run_id AND h.case_id = s.case_id "
+            "     AND h.id = (SELECT MAX(id) FROM human_grades "
+            "                 WHERE run_id = s.run_id AND case_id = s.case_id) "
             "ORDER BY r.started_at, s.id"
         ).fetchall()
         records: list[dict[str, Any]] = []
@@ -454,10 +535,134 @@ class Store:
                     # quality floor can point at the cases that failed it.
                     "eval_run_id": row["run_id"],
                     "case_id": row["case_id"],
+                    # Who graded it, when a person did: the value above is then
+                    # theirs and not the model's.
+                    "graded_by": row["graded_by"],
                     "last_ts_millis": int(when.timestamp() * 1000),
                 }
             )
         return records
+
+    # ------------------------------------------------------------------
+    # Principals and human grades
+    # ------------------------------------------------------------------
+
+    def add_principal(
+        self, name: str, role: str, key: str, now: datetime | None = None
+    ) -> Principal:
+        """Register `name` with `role`, holding only the hash of `key`."""
+        if not _PRINCIPAL_NAME.match(name):
+            raise PrincipalError(
+                f"{name!r} is not a usable name: 1 to 64 of letters, digits and . _ @ -, "
+                "starting with a letter or digit"
+            )
+        if role not in ROLES:
+            raise PrincipalError(f"{role!r} is not a role; use one of {', '.join(ROLES)}")
+        created = now or datetime.now(tz=UTC)
+        try:
+            self._conn.execute(
+                "INSERT INTO principals (name, role, key_sha256, created_at) VALUES (?, ?, ?, ?)",
+                (name, role, hash_key(key), _iso(created)),
+            )
+        except sqlite3.IntegrityError:
+            raise PrincipalError(f"{name!r} is already registered") from None
+        self._conn.commit()
+        return Principal(name=name, role=role, created_at=created)
+
+    def list_principals(self) -> list[Principal]:
+        rows: list[Any] = self._conn.execute(
+            "SELECT name, role, created_at FROM principals ORDER BY name"
+        ).fetchall()
+        return [Principal(r["name"], r["role"], _parse_iso(r["created_at"])) for r in rows]
+
+    def _verified_principal(self, name: str, key: str) -> Principal:
+        """The principal `name` is, if `key` is theirs; GradeError otherwise.
+
+        One message for an unknown name and a wrong key, so the refusal does not
+        say which names exist, and the hash is compared either way.
+        """
+        row: Any = self._conn.execute(
+            "SELECT name, role, key_sha256, created_at FROM principals WHERE name = ?", (name,)
+        ).fetchone()
+        expected = row["key_sha256"] if row is not None else hash_key("")
+        matches = hmac.compare_digest(hash_key(key), expected)
+        if row is None or not matches:
+            raise GradeError(f"author {name!r} or its key is not recognised")
+        return Principal(row["name"], row["role"], _parse_iso(row["created_at"]))
+
+    def add_human_grade(
+        self,
+        run_id: str,
+        case_id: str,
+        value: float,
+        *,
+        author: str,
+        key: str,
+        note: str = "",
+        now: datetime | None = None,
+    ) -> HumanGrade:
+        """Write a person's grade of one case. The only door to `human_grades`.
+
+        Who may come through is decided here and nowhere else: the key must be
+        `author`'s, and `author` must be a reviewer. Whoever only uploads
+        results holds an uploader key at most, and that is refused. The case
+        must have a score to outweigh: a run that never had it, or a typed case
+        nobody answered, has no score and would be a grade invented from
+        nothing.
+        """
+        principal = self._verified_principal(author, key)
+        if principal.role != ROLE_REVIEWER:
+            raise GradeError(
+                f"{author!r} is registered as {principal.role}: only a reviewer can grade"
+            )
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+            raise GradeError(f"a grade is a value between 0 and 1, got {value!r}")
+        if self._conn.execute("SELECT 1 FROM eval_runs WHERE id = ?", (run_id,)).fetchone() is None:
+            raise GradeError(f"no such eval run: {run_id!r}")
+        scored = self._conn.execute(
+            "SELECT 1 FROM scores WHERE run_id = ? AND case_id = ? LIMIT 1", (run_id, case_id)
+        ).fetchone()
+        if scored is None:
+            asked = self._conn.execute(
+                "SELECT 1 FROM unanswered WHERE run_id = ? AND case_id = ? LIMIT 1",
+                (run_id, case_id),
+            ).fetchone()
+            if asked is not None:
+                raise GradeError(
+                    f"case {case_id!r} of run {run_id!r} has no answer to grade: "
+                    "nothing was scored, so there is no score for a person to outweigh"
+                )
+            raise GradeError(f"no such case {case_id!r} in run {run_id!r}")
+        created = now or datetime.now(tz=UTC)
+        self._conn.execute(
+            "INSERT INTO human_grades (run_id, case_id, value, author, created_at, note) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (run_id, case_id, float(value), author, _iso(created), note),
+        )
+        self._conn.commit()
+        return HumanGrade(run_id, case_id, float(value), author, created, note)
+
+    def human_grades(self, run_id: str, case_id: str | None = None) -> list[HumanGrade]:
+        """Every human grade of a run (or one case of it), oldest first."""
+        sql = "SELECT run_id, case_id, value, author, created_at, note FROM human_grades"
+        sql += " WHERE run_id = ?"
+        params: list[Any] = [run_id]
+        if case_id is not None:
+            sql += " AND case_id = ?"
+            params.append(case_id)
+        sql += " ORDER BY id"
+        rows: list[Any] = self._conn.execute(sql, params).fetchall()
+        return [
+            HumanGrade(
+                r["run_id"],
+                r["case_id"],
+                r["value"],
+                r["author"],
+                _parse_iso(r["created_at"]),
+                r["note"],
+            )
+            for r in rows
+        ]
 
     # ------------------------------------------------------------------
     # Findings and fixes

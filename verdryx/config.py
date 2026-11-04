@@ -26,6 +26,12 @@ ENV_ANTHROPIC_BASE_URL = "ANTHROPIC_BASE_URL"
 #: what actually enables the typed grader (see cli.py).
 ENV_TYPRYX_KEY_FILE = "VERDRYX_TYPRYX_KEY_FILE"
 
+#: Path to a file holding a reviewer's key, the fallback for `verdryx grade
+#: --key-file`. A path and never the key, for the reason ENV_TYPRYX_KEY_FILE
+#: gives. It names a credential and grants nothing by itself: the store still
+#: has to hold a reviewer under the author name given.
+ENV_REVIEWER_KEY_FILE = "VERDRYX_REVIEWER_KEY_FILE"
+
 #: The installed stack's published home, where `stack-up` puts binaries, the
 #: shared venv and the per-tool stores. Honoured here for the same reason
 #: stack-up honours it: so the whole layout can be pointed at a scratch
@@ -119,6 +125,7 @@ class Config:
     anthropic_api_key: str | None
     anthropic_base_url: str | None
     typryx_key_file: str | None
+    reviewer_key_file: str | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
@@ -130,4 +137,5 @@ class Config:
             anthropic_api_key=e.get(ENV_ANTHROPIC_API_KEY) or None,
             anthropic_base_url=e.get(ENV_ANTHROPIC_BASE_URL) or None,
             typryx_key_file=e.get(ENV_TYPRYX_KEY_FILE) or None,
+            reviewer_key_file=e.get(ENV_REVIEWER_KEY_FILE) or None,
         )
