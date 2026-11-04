@@ -1324,3 +1324,22 @@ def test_judge_message_fence_carries_at_least_128_bits() -> None:
     random part is at least 128 bits, which is at least 32 hex digits."""
     fence = _output_fence(_build_judge_message("the task", "an output", "the rubric"))
     assert len(fence) >= 32
+
+
+def test_typryx_client_timeout_says_typryx_did_not_answer_in_time_not_that_it_is_unreachable(
+    slow_typryx,
+) -> None:
+    """A real server that read the request and kept it. The old message said
+    `could not reach typryx`, which sends an operator to check the network
+    when the thing to check is how long the model behind typryx takes."""
+    client = TypryxClient(slow_typryx, "k1", timeout=0.3)
+
+    with pytest.raises(TypryxError) as exc_info:
+        client.ask({"task": "t", "final_answer": "a"}, None)
+
+    assert exc_info.value.status is None
+    message = str(exc_info.value)
+    assert "did not answer within 0.3s" in message
+    assert slow_typryx in message
+    assert "could not reach" not in message
+    assert "k1" not in message
