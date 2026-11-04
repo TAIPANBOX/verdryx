@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -169,6 +170,43 @@ def typryx_fake():
     fake = TypryxFake(server, f"http://127.0.0.1:{server.server_port}")
     try:
         yield fake
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class _SlowTypryxHandler(BaseHTTPRequestHandler):
+    """Reads the request and then does not answer for `delay` seconds: a typryx
+    behind a model that is slow to load or slow to read a prompt."""
+
+    delay = 2.0
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        time.sleep(type(self).delay)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+        except OSError:
+            pass  # the client gave up first, which is what these tests provoke
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+@pytest.fixture()
+def slow_typryx():
+    """URL of a real loopback server that accepts a request and answers it
+    only after two seconds. TypryxClient makes a real HTTP request to it, so a
+    client-side timeout is the real thing and not a mocked exception."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _SlowTypryxHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
     finally:
         server.shutdown()
         server.server_close()

@@ -1608,3 +1608,242 @@ def test_eval_command_typed_template_flag_is_sent_to_typryx(typryx_fake, tmp_pat
     capsys.readouterr()
     [request] = typryx_fake.requests
     assert request["body"]["template"] == "eval.answer_quality"
+
+
+# ------------------------------------------------------------------
+# Events the operator asked for reach the bus, or the command says they did not
+# ------------------------------------------------------------------
+
+
+def _regressed_store(tmp_path: Path, sample_evalset_path: Path, *eval_extra: str) -> Path:
+    """A store holding one stub run (mean 1.0) and a baseline above it, so
+    `drift --baseline too-high` reads as regressed."""
+    db = tmp_path / "store.db"
+    main(["eval", str(sample_evalset_path), "--model", "stub", "--db", str(db), *eval_extra])
+    with Store.open(db) as store:
+        run_id = store.list_runs()[0].id
+        store.set_baseline(
+            Baseline(
+                id="too-high", eval_run_id=run_id, mean_score=1.5, created_at=datetime.now(tz=UTC)
+            )
+        )
+    return db
+
+
+def test_drift_command_regressed_event_carries_the_agent_the_run_was_stored_with(
+    sample_evalset_path, tmp_path, agent_id
+) -> None:
+    """`verdryx eval --agent-id` stamps the agent on the stored run. A drift
+    check over that run used to need the same id typed again and, without it,
+    printed `regressed` and put nothing on the bus."""
+    events_path = tmp_path / "events.ndjson"
+    db = _regressed_store(tmp_path, sample_evalset_path, "--agent-id", agent_id)
+
+    main(["drift", "--baseline", "too-high", "--db", str(db), "--events", str(events_path)])
+
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert [e["type"] for e in events] == ["quality_drift"]
+    assert events[0]["agent_id"] == agent_id
+
+
+def test_drift_command_event_names_the_newest_run_in_the_window_not_the_oldest(
+    sample_evalset_path, tmp_path
+) -> None:
+    """`Store.list_runs` returns the most recent run FIRST, and `drift` read the
+    run it names off the END of that list, so a window of more than one run
+    named the oldest run (and its agent) instead of the one that just ran."""
+    db = tmp_path / "store.db"
+    events_path = tmp_path / "events.ndjson"
+    older = "agent://acme-bank.example/support/older-bot"
+    newer = "agent://acme-bank.example/support/newer-bot"
+    for who in (older, newer):
+        main(
+            [
+                "eval",
+                str(sample_evalset_path),
+                "--model",
+                "stub",
+                "--db",
+                str(db),
+                "--agent-id",
+                who,
+            ]
+        )
+    with Store.open(db) as store:
+        newest_run, oldest_run = store.list_runs()[0], store.list_runs()[1]
+        assert (newest_run.agent_id, oldest_run.agent_id) == (newer, older)
+        store.set_baseline(
+            Baseline(
+                id="too-high",
+                eval_run_id=oldest_run.id,
+                mean_score=1.5,
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+
+    main(
+        [
+            "drift",
+            "--baseline",
+            "too-high",
+            "--db",
+            str(db),
+            "--window",
+            "2",
+            "--events",
+            str(events_path),
+        ]
+    )
+
+    [event] = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert event["run_id"] == newest_run.id
+    assert event["agent_id"] == newer
+
+
+def test_drift_command_agent_id_flag_overrides_the_one_stored_with_the_run(
+    sample_evalset_path, tmp_path, agent_id
+) -> None:
+    events_path = tmp_path / "events.ndjson"
+    db = _regressed_store(tmp_path, sample_evalset_path, "--agent-id", agent_id)
+
+    main(
+        [
+            "drift",
+            "--baseline",
+            "too-high",
+            "--db",
+            str(db),
+            "--events",
+            str(events_path),
+            "--agent-id",
+            "agent://acme-bank.example/support/tier2-bot",
+        ]
+    )
+
+    [event] = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert event["agent_id"] == "agent://acme-bank.example/support/tier2-bot"
+
+
+def test_drift_command_regressed_with_no_agent_anywhere_says_the_event_was_not_written(
+    sample_evalset_path, tmp_path, capsys
+) -> None:
+    events_path = tmp_path / "events.ndjson"
+    db = _regressed_store(tmp_path, sample_evalset_path)
+    capsys.readouterr()
+
+    main(["drift", "--baseline", "too-high", "--db", str(db), "--events", str(events_path)])
+
+    captured = capsys.readouterr()
+    assert "verdict:    regressed" in captured.out
+    assert not events_path.exists()
+    assert "1 event(s) not written" in captured.err
+    assert str(events_path) in captured.err
+    assert "--agent-id" in captured.err
+
+
+def test_eval_command_with_events_but_no_agent_id_says_nothing_was_written(
+    sample_evalset_path, sample_evalset, tmp_path, capsys
+) -> None:
+    """A quality_score per case plus one eval_run: all of them dropped without
+    a word when no agent id was given."""
+    events_path = tmp_path / "events.ndjson"
+
+    main(
+        [
+            "eval",
+            str(sample_evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(tmp_path / "store.db"),
+            "--events",
+            str(events_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert not events_path.exists()
+    assert f"{len(sample_evalset.cases) + 1} event(s) not written" in captured.err
+    assert "--agent-id" in captured.err
+
+
+def test_eval_command_with_events_and_an_agent_id_prints_no_event_warning(
+    sample_evalset_path, tmp_path, agent_id, capsys
+) -> None:
+    events_path = tmp_path / "events.ndjson"
+
+    main(
+        [
+            "eval",
+            str(sample_evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(tmp_path / "store.db"),
+            "--events",
+            str(events_path),
+            "--agent-id",
+            agent_id,
+        ]
+    )
+
+    assert events_path.exists()
+    assert "not written" not in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------
+# The wait for typryx is the operator's to set, and a slow typryx is not "unreachable"
+# ------------------------------------------------------------------
+
+
+def test_eval_command_typed_timeout_flag_bounds_the_wait_and_says_slow_not_unreachable(
+    slow_typryx, tmp_path, capsys
+) -> None:
+    key_file = tmp_path / "typryx.key"
+    key_file.write_text("k1")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "eval",
+                str(_typed_evalset_path(tmp_path)),
+                "--model",
+                "stub",
+                "--db",
+                str(tmp_path / "store.db"),
+                "--typed-url",
+                slow_typryx,
+                "--typed-key-file",
+                str(key_file),
+                "--typed-timeout",
+                "0.3",
+            ]
+        )
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "did not answer within 0.3s" in err
+    assert "--typed-timeout" in err
+    assert "could not reach" not in err
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "soon"])
+def test_eval_command_typed_timeout_must_be_a_positive_number(bad, tmp_path, capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "eval",
+                str(_typed_evalset_path(tmp_path)),
+                "--model",
+                "stub",
+                "--typed-url",
+                "http://127.0.0.1:1",
+                "--typed-timeout",
+                bad,
+            ]
+        )
+
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "argument --typed-timeout" in err
+    assert "is not a positive number of seconds" in err

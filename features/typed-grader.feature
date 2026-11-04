@@ -70,3 +70,22 @@ Feature: A typed verdict from typryx, and the human label back to it
     Given verdryx is given a typryx key file
     When typryx refuses a request
     Then the error names the status and typryx's code and not the key
+
+  # @test:test_typryx_client_timeout_says_typryx_did_not_answer_in_time_not_that_it_is_unreachable
+  Scenario: A slow typryx is not an unreachable one
+    Given a typryx that takes the request and keeps it
+    When verdryx waits for its answer longer than it is willing to
+    Then the error says typryx did not answer within that many seconds
+    And it does not say typryx could not be reached
+
+  # @test:test_eval_command_typed_timeout_flag_bounds_the_wait_and_says_slow_not_unreachable
+  Scenario: The wait for typryx is the operator's to set
+    Given a typryx that takes the request and keeps it
+    When verdryx grades a typed case with a short typed timeout
+    Then the run ends after that wait with the error naming the typed timeout flag
+
+  # @test:test_eval_command_typed_timeout_must_be_a_positive_number
+  Scenario: A wait that is not a positive number is refused
+    Given a typed timeout of zero, a negative number or a word
+    When verdryx reads its arguments
+    Then it refuses the argument by name before any request is made

@@ -610,6 +610,21 @@ class TypryxClient:
             # Covers urllib.error.URLError (a subclass of OSError) and a
             # bare socket timeout/connection error that never reaches an
             # HTTP response at all: no status, no code, only the URL.
+            #
+            # A timeout is told apart from the rest. Reaching a typryx whose
+            # model is slow (a cold start, a CPU-bound local model) is not the
+            # same fact as not reaching it, and the old "could not reach"
+            # sent an operator to check the network instead of the wait.
+            # A connect-phase timeout arrives wrapped in URLError, a read-phase
+            # one bare; both mean typryx did not answer in time.
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if isinstance(reason, TimeoutError):
+                raise TypryxError(
+                    f"typryx at {self._url} did not answer within {self._timeout:g}s "
+                    "(the model behind it may be slow or still loading: raise the client wait "
+                    "with --typed-timeout, and keep typryx's own TYPRYX_TIMEOUT_MS below it so "
+                    "a slow answer comes back as an unanswered case instead of ending the run)"
+                ) from None
             raise TypryxError(f"could not reach typryx at {self._url}: {exc}") from None
 
     def ask(self, state: dict[str, Any], run_id: str | None) -> dict[str, Any]:

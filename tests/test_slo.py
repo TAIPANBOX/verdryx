@@ -347,10 +347,36 @@ def test_an_established_breach_does_reach_the_bus_with_its_evidence():
         "window",
         "budget_remaining",
         "burn_rate",
+        "burn_events_seen",
         "trigger",
         "identity_field",
         "_subject",
     }
+
+
+def test_a_burn_event_carries_the_count_behind_its_rate_so_an_unmeasured_rate_shows():
+    """`burn_rate` is 0.0 both for a fleet burning nothing and for a rate nobody
+    could measure (no clock). The report prints the second apart, in its blind
+    spots; a line on the bus has no blind spots, so the n behind the rate has to
+    travel with it, or a program reads an unmeasured zero as a measured one.
+    Found 2026-11-04 on a real run: an exhausted `quality_floor` went out with
+    `burn_rate: 0.0` for an agent whose scores carried no timestamp."""
+    no_clock = _runs(20) + _runs(20, prefix="bad", outcome=OUTCOME_ESCALATED)
+    [blind] = [
+        e
+        for e in slo.burn_events(slo.compute_slo(no_clock, min_events=10))
+        if e["sli"] == slo.SLI_TASK_SUCCESS
+    ]
+    assert blind["burn_rate"] == 0.0
+    assert blind["burn_events_seen"] == 0
+
+    with_clock = _timeline(good_then=120, bad_now=120)
+    [measured] = [
+        e
+        for e in slo.burn_events(slo.compute_slo(with_clock, min_events=10, min_burn_events=5))
+        if e["sli"] == slo.SLI_TASK_SUCCESS
+    ]
+    assert measured["burn_events_seen"] > 0
 
 
 def test_an_unmeasured_indicator_emits_nothing():
