@@ -9,12 +9,22 @@ as Engram's schema.py).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from verdryx.models import Baseline, EvalRun, Score, Unanswered
+from verdryx.models import (
+    STATUS_FIX_PENDING,
+    STATUS_OPEN,
+    Baseline,
+    EvalRun,
+    Finding,
+    Fix,
+    Score,
+    Unanswered,
+)
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS eval_runs (
@@ -22,7 +32,8 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     model         TEXT NOT NULL,
     started_at    TEXT NOT NULL,
     finished_at   TEXT,
-    agent_id      TEXT
+    agent_id      TEXT,
+    agent_version TEXT
 );
 
 CREATE TABLE IF NOT EXISTS scores (
@@ -63,6 +74,46 @@ CREATE TABLE IF NOT EXISTS unanswered (
 );
 
 CREATE INDEX IF NOT EXISTS idx_unanswered_run_id ON unanswered(run_id);
+
+-- A recorded quality failure (models.Finding). New tables, not widened
+-- columns, for the reason the SCHEMA_VERSION comment gives for `unanswered`:
+-- a build that predates them never names them. `evidence`, `detail` and a
+-- fix's `result` are JSON text; `dedupe_key` is what makes the same failure
+-- seen again one finding instead of a second row.
+CREATE TABLE IF NOT EXISTS findings (
+    id                TEXT PRIMARY KEY,
+    dedupe_key        TEXT NOT NULL,
+    agent_id          TEXT,
+    kind              TEXT NOT NULL,
+    sli               TEXT,
+    window            TEXT NOT NULL,
+    status            TEXT NOT NULL,
+    opened_at         TEXT NOT NULL,
+    last_seen_at      TEXT NOT NULL,
+    seen_count        INTEGER NOT NULL DEFAULT 1,
+    closed_at         TEXT,
+    evidence          TEXT NOT NULL,
+    detail            TEXT NOT NULL,
+    suspect_model     TEXT,
+    suspect_version   TEXT,
+    suspect_since_run TEXT,
+    suspect_note      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_findings_dedupe_key ON findings(dedupe_key);
+
+CREATE TABLE IF NOT EXISTS fixes (
+    id            TEXT PRIMARY KEY,
+    finding_id    TEXT NOT NULL REFERENCES findings(id),
+    note          TEXT NOT NULL,
+    version       TEXT,
+    registered_at TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    evaluated_at  TEXT,
+    result        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fixes_finding_id ON fixes(finding_id);
 """
 
 
@@ -131,7 +182,7 @@ SCHEMA_VERSION = 1
 #: one: SQLite fills existing rows with NULL, and NULL is the honest answer for
 #: a run whose subject nobody recorded. A `DEFAULT` here would invent an
 #: attribution for every historical run in one statement.
-_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (("agent_id", "TEXT"),)
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (("agent_id", "TEXT"), ("agent_version", "TEXT"))
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
@@ -260,14 +311,16 @@ class Store:
         `agent_id=""` loads back as `agent_id=None`.
         """
         self._conn.execute(
-            "INSERT OR REPLACE INTO eval_runs (id, model, started_at, finished_at, agent_id) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO eval_runs "
+            "(id, model, started_at, finished_at, agent_id, agent_version) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 run.id,
                 run.model,
                 _iso(run.started_at),
                 _iso(run.finished_at) if run.finished_at else None,
                 run.agent_id or None,
+                run.agent_version or None,
             ),
         )
         self._conn.execute("DELETE FROM scores WHERE run_id = ?", (run.id,))
@@ -285,7 +338,8 @@ class Store:
     def load_run(self, run_id: str) -> EvalRun | None:
         """Fetch a single eval run by id, with its scores, or None."""
         row: Any = self._conn.execute(
-            "SELECT id, model, started_at, finished_at, agent_id FROM eval_runs WHERE id = ?",
+            "SELECT id, model, started_at, finished_at, agent_id, agent_version "
+            "FROM eval_runs WHERE id = ?",
             (run_id,),
         ).fetchone()
         if row is None:
@@ -299,7 +353,7 @@ class Store:
             model: If set, restrict to runs of this model.
             limit: If set, return at most this many runs.
         """
-        sql = "SELECT id, model, started_at, finished_at, agent_id FROM eval_runs"
+        sql = "SELECT id, model, started_at, finished_at, agent_id, agent_version FROM eval_runs"
         params: tuple[Any, ...] = ()
         if model is not None:
             sql += " WHERE model = ?"
@@ -341,6 +395,10 @@ class Store:
             # name, a default agent, the first subject the store holds) would
             # attribute somebody's runs to an agent that never made them.
             agent_id=row["agent_id"],
+            # NULL stays None here too: a run nobody labelled has no version,
+            # and a made-up one would let a finding blame a build that never
+            # ran.
+            agent_version=row["agent_version"],
             # [] for a run that predates the `unanswered` table too -- a
             # store that old never had a case counted apart from a Score in
             # the first place, so an empty list is the honest read, not a
@@ -380,6 +438,7 @@ class Store:
         """
         rows: list[Any] = self._conn.execute(
             "SELECT r.agent_id AS agent_id, s.value AS value, "
+            "       r.id AS run_id, s.case_id AS case_id, "
             "       r.finished_at AS finished_at, r.started_at AS started_at "
             "FROM scores s JOIN eval_runs r ON s.run_id = r.id "
             "ORDER BY r.started_at, s.id"
@@ -391,10 +450,198 @@ class Store:
                 {
                     "agent_id": row["agent_id"] or "",
                     "score": row["value"],
+                    # Which stored score this is, so a finding built on the
+                    # quality floor can point at the cases that failed it.
+                    "eval_run_id": row["run_id"],
+                    "case_id": row["case_id"],
                     "last_ts_millis": int(when.timestamp() * 1000),
                 }
             )
         return records
+
+    # ------------------------------------------------------------------
+    # Findings and fixes
+    # ------------------------------------------------------------------
+
+    def add_finding(self, finding: Finding) -> None:
+        self._conn.execute(
+            "INSERT INTO findings (id, dedupe_key, agent_id, kind, sli, window, status, "
+            "opened_at, last_seen_at, seen_count, closed_at, evidence, detail, "
+            "suspect_model, suspect_version, suspect_since_run, suspect_note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            self._finding_row(finding),
+        )
+        self._conn.commit()
+
+    def update_finding(self, finding: Finding) -> None:
+        """Rewrite every column of an existing finding except its id."""
+        row = self._finding_row(finding)
+        self._conn.execute(
+            "UPDATE findings SET dedupe_key=?, agent_id=?, kind=?, sli=?, window=?, status=?, "
+            "opened_at=?, last_seen_at=?, seen_count=?, closed_at=?, evidence=?, detail=?, "
+            "suspect_model=?, suspect_version=?, suspect_since_run=?, suspect_note=? "
+            "WHERE id = ?",
+            (*row[1:], finding.id),
+        )
+        self._conn.commit()
+
+    @staticmethod
+    def _finding_row(f: Finding) -> tuple[Any, ...]:
+        return (
+            f.id,
+            f.dedupe_key,
+            f.agent_id or None,
+            f.kind,
+            f.sli,
+            f.window,
+            f.status,
+            _iso(f.opened_at),
+            _iso(f.last_seen_at),
+            f.seen_count,
+            _iso(f.closed_at) if f.closed_at else None,
+            json.dumps(f.evidence),
+            json.dumps(f.detail, sort_keys=True),
+            f.suspect_model,
+            f.suspect_version,
+            f.suspect_since_run,
+            f.suspect_note,
+        )
+
+    def get_finding(self, finding_id: str) -> Finding | None:
+        row: Any = self._conn.execute(
+            "SELECT * FROM findings WHERE id = ?", (finding_id,)
+        ).fetchone()
+        return self._hydrate_finding(row) if row is not None else None
+
+    def resolve_finding_id(self, prefix: str) -> str:
+        """The full id a unique prefix names, or LookupError saying why not.
+
+        Matched in Python rather than with LIKE, so a `%` or `_` typed by an
+        operator is a character and not a wildcard.
+        """
+        ids = [r["id"] for r in self._conn.execute("SELECT id FROM findings ORDER BY id")]
+        matches = [i for i in ids if prefix and i.startswith(prefix)]
+        if not matches:
+            raise LookupError(f"no finding with an id starting {prefix!r}")
+        if len(matches) > 1:
+            raise LookupError(f"{len(matches)} findings start with {prefix!r}; give more of the id")
+        return str(matches[0])
+
+    def list_findings(
+        self,
+        statuses: tuple[str, ...] | list[str] | None = (STATUS_OPEN, STATUS_FIX_PENDING),
+        agent_id: str | None = None,
+    ) -> list[Finding]:
+        """Findings, most recently seen first. `statuses=None` means every status."""
+        sql = "SELECT * FROM findings"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if statuses is not None:
+            clauses.append(f"status IN ({', '.join('?' for _ in statuses)})")
+            params.extend(statuses)
+        if agent_id is not None:
+            clauses.append("agent_id = ?")
+            params.append(agent_id)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY last_seen_at DESC, id"
+        rows: list[Any] = self._conn.execute(sql, params).fetchall()
+        return [self._hydrate_finding(r) for r in rows]
+
+    def find_active_by_key(self, dedupe_key: str) -> Finding | None:
+        """The open or fix-pending finding for this key, if there is one.
+
+        A closed finding is history, not a match: the same failure after a
+        verified fix is a new finding.
+        """
+        row: Any = self._conn.execute(
+            "SELECT * FROM findings WHERE dedupe_key = ? AND status IN (?, ?) "
+            "ORDER BY opened_at DESC LIMIT 1",
+            (dedupe_key, STATUS_OPEN, STATUS_FIX_PENDING),
+        ).fetchone()
+        return self._hydrate_finding(row) if row is not None else None
+
+    def fix_horizon(self, dedupe_key: str) -> datetime | None:
+        """When the newest fix for this key was registered, or None for never.
+
+        Runs from before that moment are the ones the fix was written against.
+        They stay in every pooled window for a while, and without this line a
+        verified fix would be undone by the runs it was verified against.
+        """
+        rows: list[Any] = self._conn.execute(
+            "SELECT x.registered_at AS at FROM fixes x JOIN findings f ON x.finding_id = f.id "
+            "WHERE f.dedupe_key = ?",
+            (dedupe_key,),
+        ).fetchall()
+        times = [_parse_iso(r["at"]) for r in rows]
+        return max(times) if times else None
+
+    def add_fix(self, fix: Fix) -> None:
+        self._conn.execute(
+            "INSERT INTO fixes (id, finding_id, note, version, registered_at, status, "
+            "evaluated_at, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                fix.id,
+                fix.finding_id,
+                fix.note,
+                fix.version,
+                _iso(fix.registered_at),
+                fix.status,
+                _iso(fix.evaluated_at) if fix.evaluated_at else None,
+                json.dumps(fix.result, sort_keys=True),
+            ),
+        )
+        self._conn.commit()
+
+    def update_fix(self, fix: Fix) -> None:
+        self._conn.execute(
+            "UPDATE fixes SET status = ?, evaluated_at = ?, result = ? WHERE id = ?",
+            (
+                fix.status,
+                _iso(fix.evaluated_at) if fix.evaluated_at else None,
+                json.dumps(fix.result, sort_keys=True),
+                fix.id,
+            ),
+        )
+        self._conn.commit()
+
+    def _hydrate_finding(self, row: Any) -> Finding:
+        fix_rows: list[Any] = self._conn.execute(
+            "SELECT * FROM fixes WHERE finding_id = ? ORDER BY registered_at, id", (row["id"],)
+        ).fetchall()
+        fixes = [
+            Fix(
+                id=r["id"],
+                finding_id=r["finding_id"],
+                note=r["note"],
+                registered_at=_parse_iso(r["registered_at"]),
+                version=r["version"],
+                status=r["status"],
+                evaluated_at=_parse_iso(r["evaluated_at"]) if r["evaluated_at"] else None,
+                result=json.loads(r["result"]),
+            )
+            for r in fix_rows
+        ]
+        return Finding(
+            id=row["id"],
+            dedupe_key=row["dedupe_key"],
+            agent_id=row["agent_id"],
+            kind=row["kind"],
+            sli=row["sli"],
+            window=row["window"],
+            status=row["status"],
+            opened_at=_parse_iso(row["opened_at"]),
+            last_seen_at=_parse_iso(row["last_seen_at"]),
+            seen_count=row["seen_count"],
+            evidence=json.loads(row["evidence"]),
+            detail=json.loads(row["detail"]),
+            suspect_model=row["suspect_model"],
+            suspect_version=row["suspect_version"],
+            suspect_since_run=row["suspect_since_run"],
+            suspect_note=row["suspect_note"],
+            closed_at=_parse_iso(row["closed_at"]) if row["closed_at"] else None,
+            fixes=fixes,
+        )
 
     # ------------------------------------------------------------------
     # Baselines

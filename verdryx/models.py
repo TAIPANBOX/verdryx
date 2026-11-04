@@ -272,6 +272,13 @@ class Score:
     value: float
     tokens: int = 0
     cost_usd: float = 0.0
+    #: Set only on a score read back from the store after a person graded this
+    #: case: who graded it, and what the model had said. `value` is then the
+    #: person's and `model_value` is kept beside it, so nothing the model said
+    #: is lost and nobody has to guess which of the two a mean rests on. Both
+    #: stay None for every score a grader has just produced.
+    graded_by: str | None = None
+    model_value: float | None = None
 
 
 @dataclass
@@ -343,6 +350,12 @@ class EvalRun:
     finished_at: datetime | None = None
     scores: list[Score] = field(default_factory=list)
     agent_id: str | None = None
+    #: Which build of the agent this run was made against: a git sha, a prompt
+    #: version, any label the operator gives `verdryx eval --agent-version`.
+    #: None when nobody said, and never inferred. It is what lets a finding name
+    #: the version that changed (`findings.find_suspect`) and lets a registered
+    #: fix be tested only by runs of the build that carries it.
+    agent_version: str | None = None
     #: Typed cases typryx could not answer, counted apart from `scores`
     #: rather than scored 0.0 or failing the run -- see `Unanswered`.
     #: Default empty: every non-typed run, and every typed run that ran
@@ -378,6 +391,11 @@ class EvalRun:
         from "nothing could be asked".
         """
         return len(self.scores) + len(self.unanswered)
+
+    @property
+    def human_graded(self) -> int:
+        """How many of the scored cases carry a person's grade."""
+        return sum(1 for s in self.scores if s.graded_by is not None)
 
     @property
     def total_tokens(self) -> int:
@@ -568,3 +586,97 @@ class SloReport:
     #: shows a non-zero `total_scores`.
     unattributed_scores: int = 0
     total_scores: int = 0
+    #: For each (subject, sli) that fired `exhausted` or `fast_burn`: the
+    #: identifiers of the judged units that failed that indicator, newest
+    #: first and capped (`slo.EVIDENCE_CAP`). `trace:<run_id>` for a gateway
+    #: run, `eval:<eval_run_id>:<case_id>` for a stored score. Empty for every
+    #: other (subject, sli); a finding reads it, nothing else does.
+    evidence: dict[tuple[str, str], list[str]] = field(default_factory=dict)
+
+
+# ------------------------------------------------------------------
+# Findings and the fixes registered against them
+# ------------------------------------------------------------------
+
+#: What kind of failure a finding records. `drift` is a regression against a
+#: stored baseline; the two `slo_*` kinds are the two triggers that reach the
+#: bus (`slo.TRIGGER_EXHAUSTED`, `slo.TRIGGER_FAST_BURN`). A slow burn is
+#: reported and never recorded, for the reason it is never put on the bus.
+FINDING_DRIFT = "drift"
+FINDING_SLO_EXHAUSTED = "slo_exhausted"
+FINDING_SLO_FAST_BURN = "slo_fast_burn"
+FINDING_KINDS = (FINDING_DRIFT, FINDING_SLO_EXHAUSTED, FINDING_SLO_FAST_BURN)
+
+#: `open`: seen and not being fixed. `fix_pending`: a fix is registered and
+#: no run since has decided it. `closed`: a fix was verified.
+STATUS_OPEN = "open"
+STATUS_FIX_PENDING = "fix_pending"
+STATUS_CLOSED = "closed"
+FINDING_STATUSES = (STATUS_OPEN, STATUS_FIX_PENDING, STATUS_CLOSED)
+
+FIX_PENDING = "pending"
+FIX_VERIFIED = "verified"
+FIX_FAILED = "failed"
+
+
+@dataclass
+class Fix:
+    """One attempt to fix a finding, and what the next runs said about it.
+
+    `result` is the last evaluation: for `verified` and `failed` the numbers
+    that decided it and the runs they were taken over, for `pending` the
+    reason it is still undecided (no run since, too few runs to measure).
+    A `pending` fix is never `verified` for want of data: an unmeasured
+    indicator is not a pass (CLAUDE.md invariant 8).
+    """
+
+    id: str
+    finding_id: str
+    note: str
+    registered_at: datetime
+    #: The agent build the fix ships in. When set, only runs that carry this
+    #: version can test it (see `findings.runs_that_test_a_fix`).
+    version: str | None = None
+    status: str = FIX_PENDING
+    evaluated_at: datetime | None = None
+    result: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Finding:
+    """A recorded quality failure: who, over what, what kind, shown by which runs.
+
+    Everything here is computed from the stores and traces on disk, so a
+    finding is as useful with no model reachable as with one.
+
+    `agent_id` is None for a regression nobody attributed; it is kept and says
+    so rather than being dropped, because a finding that only exists for
+    labelled agents hides exactly the runs nobody labelled.
+
+    `suspect_*` is the model or version that changed across the runs examined,
+    and `suspect_note` always says which of three things it is: a change, no
+    change, or nothing to compare. `suspect_model`/`suspect_version` are None
+    in the last two, and the note is what tells them apart.
+
+    `fixes` is the history of attempts, oldest first; a failed one stays on the
+    record when the finding is reopened.
+    """
+
+    id: str
+    dedupe_key: str
+    agent_id: str | None
+    kind: str
+    sli: str | None
+    window: str
+    status: str
+    opened_at: datetime
+    last_seen_at: datetime
+    seen_count: int
+    evidence: list[str]
+    detail: dict[str, Any]
+    suspect_model: str | None
+    suspect_version: str | None
+    suspect_since_run: str | None
+    suspect_note: str
+    closed_at: datetime | None = None
+    fixes: list[Fix] = field(default_factory=list)

@@ -43,6 +43,7 @@
           "drift",
           "cost-per-correct",
           "slo",
+          "findings",
           "version"
         ],
         "env": {
