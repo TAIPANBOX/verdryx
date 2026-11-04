@@ -43,6 +43,9 @@
           "drift",
           "cost-per-correct",
           "slo",
+          "findings",
+          "grade",
+          "principal",
           "version"
         ],
         "env": {
@@ -56,6 +59,9 @@
             "required": false
           },
           "VERDRYX_TYPRYX_KEY_FILE": {
+            "required": false
+          },
+          "VERDRYX_REVIEWER_KEY_FILE": {
             "required": false
           }
         },

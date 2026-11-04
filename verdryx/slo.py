@@ -156,6 +156,12 @@ SLOW_BURN_RATE = 2.0
 #: the second can warn, because the first is already history.
 BURN_WINDOW_FRACTION = 1.0 / 28.0
 
+#: The most identifiers a finding carries as evidence for one indicator. The
+#: newest failing units are kept: an operator opening a finding wants the runs
+#: to look at first, and a count beside them (`SloMeasurement.events`,
+#: `.good`) says how many more there are.
+EVIDENCE_CAP = 20
+
 #: Identity fields a subject may be grouped on.
 IDENTITY_AGENT_ID = "agent_id"
 IDENTITY_KEY_ID = "key_id"
@@ -589,23 +595,25 @@ def compute_slo(
     score_rows = list(scores or ())
     scored, unattributed_scores = _group_by_subject(score_rows, identity_field)
 
+    def rows_for(subject: str, sli: str) -> list[Mapping[str, Any]]:
+        # Both streams, and only for the one indicator a score can speak to. A
+        # run carrying no `score` returns None from `_sli_quality_floor` and
+        # stays out of the denominator, so concatenating cannot double-count
+        # anything.
+        if sli == SLI_QUALITY_FLOOR:
+            return grouped.get(subject, []) + scored.get(subject, [])
+        return grouped.get(subject, [])
+
     subjects = {
-        subject: [
-            evaluate_sli(
-                # Both streams, and only for the one indicator a score can
-                # speak to. A run carrying no `score` returns None from
-                # `_sli_quality_floor` and stays out of the denominator, so
-                # concatenating cannot double-count anything.
-                grouped.get(subject, []) + scored.get(subject, [])
-                if sli == SLI_QUALITY_FLOOR
-                else grouped.get(subject, []),
-                sli,
-                subject,
-                cfg,
-            )
-            for sli in SLI_NAMES
-        ]
+        subject: [evaluate_sli(rows_for(subject, sli), sli, subject, cfg) for sli in SLI_NAMES]
         for subject in sorted(set(grouped) | set(scored))
+    }
+
+    evidence = {
+        (subject, m.sli): _failing_ids(rows_for(subject, m.sli), m.sli, cfg)
+        for subject, measurements in subjects.items()
+        for m in measurements
+        if m.trigger in (TRIGGER_EXHAUSTED, TRIGGER_FAST_BURN)
     }
 
     return SloReport(
@@ -618,7 +626,44 @@ def compute_slo(
         cost_reference_usd=cfg["cost_reference"],
         unattributed_scores=unattributed_scores,
         total_scores=len(score_rows),
+        evidence=evidence,
     )
+
+
+def _evidence_id(row: Mapping[str, Any]) -> str | None:
+    """How a finding names the judged unit behind a failure, or None.
+
+    A stored score names its eval run and case; a gateway run names its
+    `run_id`. A row that carries neither (a hand-written export with no run
+    id) has nothing to point at, and is left out rather than numbered.
+    """
+    if row.get("eval_run_id"):
+        return f"eval:{row['eval_run_id']}:{row.get('case_id', '')}"
+    if row.get("run_id"):
+        return f"trace:{row['run_id']}"
+    return None
+
+
+def _failing_ids(rows: list[Mapping[str, Any]], sli: str, cfg: Mapping[str, Any]) -> list[str]:
+    """The identifiers of the judged units that failed `sli`, newest first.
+
+    Only a unit the indicator judged `False` counts: one it could not judge
+    (`None`) is not a failure and is not evidence of one.
+    """
+    fn = SLI_FUNCS[sli]
+    failing = [r for r in rows if fn(r, cfg) is False]
+    failing.sort(
+        key=lambda r: (r.get("last_ts_millis") is not None, r.get("last_ts_millis") or 0),
+        reverse=True,
+    )
+    ids: list[str] = []
+    for row in failing:
+        ident = _evidence_id(row)
+        if ident is not None:
+            ids.append(ident)
+        if len(ids) == EVIDENCE_CAP:
+            break
+    return ids
 
 
 def _group_by_subject(
@@ -721,6 +766,22 @@ def subject_is_emittable(subject: str) -> bool:
     return is_canonical_agent_id(subject)
 
 
+def established_breaches(report: SloReport) -> list[SloMeasurement]:
+    """The measurements that fired `exhausted` or `fast_burn` AND whose interval
+    shows the objective is missed.
+
+    One list for both consumers, the bus (`burn_events`) and the findings
+    store, so the bar an event is held to and the bar a finding is held to can
+    not drift apart. An unmeasured indicator is never in it.
+    """
+    return [
+        m
+        for measurements in report.subjects.values()
+        for m in measurements
+        if m.trigger in (TRIGGER_EXHAUSTED, TRIGGER_FAST_BURN) and breach_is_established(m)
+    ]
+
+
 def burn_events(report: SloReport) -> list[dict[str, Any]]:
     """The `slo_burn` payloads this report justifies, and only those.
 
@@ -742,31 +803,24 @@ def burn_events(report: SloReport) -> list[dict[str, Any]]:
     send about a number that was not computed, and sending one would put an
     absence of evidence onto a bus whose readers treat every line as a fact.
     """
-    payloads: list[dict[str, Any]] = []
-    for measurements in report.subjects.values():
-        for m in measurements:
-            if m.trigger not in (TRIGGER_EXHAUSTED, TRIGGER_FAST_BURN):
-                continue
-            if not breach_is_established(m):
-                continue
-            payloads.append(
-                {
-                    "sli": m.sli,
-                    "target": m.target,
-                    "observed": m.observed,
-                    "ci_low": m.ci_low,
-                    "ci_high": m.ci_high,
-                    "events": m.events,
-                    "window": report.window,
-                    "budget_remaining": m.remaining,
-                    "burn_rate": m.burn_rate,
-                    # The n behind the rate. 0.0 is both "burning nothing" and
-                    # "no clock, never measured", and the report separates the
-                    # two in its blind spots, which a bus line does not have.
-                    "burn_events_seen": m.burn_events_seen,
-                    "trigger": m.trigger,
-                    "identity_field": report.identity_field,
-                    "_subject": m.subject,
-                }
-            )
-    return payloads
+    return [
+        {
+            "sli": m.sli,
+            "target": m.target,
+            "observed": m.observed,
+            "ci_low": m.ci_low,
+            "ci_high": m.ci_high,
+            "events": m.events,
+            "window": report.window,
+            "budget_remaining": m.remaining,
+            "burn_rate": m.burn_rate,
+            # The n behind the rate. 0.0 is both "burning nothing" and
+            # "no clock, never measured", and the report separates the
+            # two in its blind spots, which a bus line does not have.
+            "burn_events_seen": m.burn_events_seen,
+            "trigger": m.trigger,
+            "identity_field": report.identity_field,
+            "_subject": m.subject,
+        }
+        for m in established_breaches(report)
+    ]

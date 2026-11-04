@@ -326,6 +326,41 @@ run_case "lock-satisfies-pyproject: the lock file taken away entirely" fail \
 	"$(py 'import pathlib; pathlib.Path("requirements-dev.lock").unlink()')" \
 	"measured nothing"
 
+# --- a human grade has exactly one door ----------------------------------------
+#
+# Four faults, one non-fault, one subject taken away. The non-fault matters: a
+# gate that fired on a READ of human_grades would be deleted by whoever is
+# unblocking CI, and reading the table is what the hydration does all day.
+
+run_case "human-grades-have-one-door: a second INSERT into human_grades" fail \
+	'./scripts/human-grades-have-one-door.sh' \
+	"$(py 'edit("verdryx/cli.py", "import argparse\n", "import argparse\n_SECOND = \"INSERT INTO human_grades (run_id) VALUES (1)\"\n")')" \
+	"a second place"
+
+run_case "human-grades-have-one-door: the door stops checking the role" fail \
+	'./scripts/human-grades-have-one-door.sh' \
+	"$(py 'edit("verdryx/store.py", "if principal.role != ROLE_REVIEWER:", "if principal.role != principal.role:")')" \
+	"does not check the role"
+
+run_case "human-grades-have-one-door: the door stops checking the credential" fail \
+	'./scripts/human-grades-have-one-door.sh' \
+	"$(py 'edit("verdryx/store.py", "principal = self._verified_principal(author, key)", "principal = Principal(author, ROLE_REVIEWER, datetime.now(tz=UTC))")')" \
+	"does not check the credential"
+
+run_case "human-grades-have-one-door: the upload path calls the door" fail \
+	'./scripts/human-grades-have-one-door.sh' \
+	"$(py 'edit("verdryx/cli.py", "        store.save_run(run)\n", "        store.save_run(run)\n        store.add_human_grade(run.id, \"x\", 1.0, author=\"a\", key=\"k\")\n")')" \
+	"outside _cmd_grade"
+
+run_case "human-grades-have-one-door: a read of human_grades elsewhere" pass \
+	'./scripts/human-grades-have-one-door.sh' \
+	"$(py 'edit("verdryx/cli.py", "import argparse\n", "import argparse\n_READ = \"SELECT * FROM human_grades\"\n")')"
+
+run_case "human-grades-have-one-door: the door taken away entirely" fail \
+	'./scripts/human-grades-have-one-door.sh' \
+	"$(py 'edit("verdryx/store.py", "def add_human_grade(", "def add_human_grades(")')" \
+	"measured nothing"
+
 echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'

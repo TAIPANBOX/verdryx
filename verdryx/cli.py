@@ -11,7 +11,14 @@ Usage::
                    [--events PATH] [--agent-id ID]
     verdryx cost-per-correct --input <ndjson-or-csv-or-parquet>
     verdryx cost-per-correct --traces <dir-of-parquet-segments>
-    verdryx slo --traces <dir-of-parquet-segments> [--scores-db PATH]
+    verdryx slo --traces <dir-of-parquet-segments> [--scores-db PATH] [--db PATH]
+    verdryx findings list [--db PATH] [--status open|closed|all] [--agent-id ID]
+    verdryx findings show <id-or-prefix> [--db PATH]
+    verdryx findings fix <id-or-prefix> --note TEXT [--version V] [--db PATH]
+    verdryx grade <run_id> <case_id> <value> --author NAME [--key-file PATH]
+                   [--note TEXT] [--db PATH]
+    verdryx principal add NAME --role reviewer|uploader --key-out PATH [--db PATH]
+    verdryx principal list [--db PATH]
     verdryx version
 
 `--model stub` (eval) selects StubLLMAdapter instead of a real Anthropic
@@ -36,13 +43,16 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sys
 import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, NoReturn
 
+from verdryx import findings as findings_mod
 from verdryx import slo
 from verdryx.config import ENV_TYPRYX_KEY_FILE, Config
 from verdryx.costper import UNTAGGED, cost_per_outcome, load_records, load_run_records
@@ -60,9 +70,21 @@ from verdryx.graders import (
     TypryxError,
     build_graders,
 )
-from verdryx.models import Baseline, EvalRun, EvalSet, GraderKind, Score, Unanswered
+from verdryx.models import (
+    FINDING_STATUSES,
+    ROLES,
+    STATUS_CLOSED,
+    STATUS_FIX_PENDING,
+    STATUS_OPEN,
+    Baseline,
+    EvalRun,
+    EvalSet,
+    GraderKind,
+    Score,
+    Unanswered,
+)
 from verdryx.otel import OTLPExporter, Span
-from verdryx.store import Store
+from verdryx.store import GradeError, PrincipalError, Store, new_key
 
 # ------------------------------------------------------------------
 # Helpers
@@ -156,9 +178,10 @@ def _build_typed_client(args: argparse.Namespace, config: Config) -> TypryxClien
 
 def _read_key_file(path: str) -> str:
     """Read and strip a credential file. A dedicated function, not an
-    inline `.read_text().strip()`, so the one place this repo reads a
-    typryx key from disk is easy to find and audit, mirroring how
-    TypryxClient is the one place it is sent over the wire."""
+    inline `.read_text().strip()`, so the one place this repo reads a key
+    from disk (typryx's, or a reviewer's) is easy to find and audit,
+    mirroring how TypryxClient is the one place the first is sent over the
+    wire."""
     with open(path, encoding="utf-8") as f:
         return f.read().strip()
 
@@ -175,6 +198,7 @@ def run_eval(
     *,
     model: str,
     agent_id: str | None = None,
+    agent_version: str | None = None,
     graders: dict[GraderKind, Grader | ToolTraceGrader] | None = None,
     typed_client: TypryxClient | None = None,
 ) -> EvalRun:
@@ -304,6 +328,7 @@ def run_eval(
         # nothing to join on. Never defaulted to the model or to anything
         # else: a run nobody attributed stays unattributed.
         agent_id=agent_id,
+        agent_version=agent_version,
         unanswered=unanswered,
     )
 
@@ -322,7 +347,12 @@ def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
     typed_client = _build_typed_client(args, config)
     try:
         run = run_eval(
-            evalset, adapter, model=args.model, agent_id=args.agent_id, typed_client=typed_client
+            evalset,
+            adapter,
+            model=args.model,
+            agent_id=args.agent_id,
+            agent_version=args.agent_version,
+            typed_client=typed_client,
         )
     except TypryxError as e:
         # A refusal (its hourly cap, a bad key, an unknown template) or a
@@ -398,6 +428,8 @@ def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
 
     try:
         subject = f", agent={run.agent_id}" if run.agent_id else ", no agent id"
+        if run.agent_version:
+            subject += f", version={run.agent_version}"
         print(f"\nEval run {run.id}  (model={run.model}{subject}, db={db_path})\n")
         if not run.scores and not run.unanswered:
             print("  (no cases)\n")
@@ -478,6 +510,18 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
                 "refusing to compare against an unfiltered pool of runs across "
                 "every model"
             )
+        if baseline_run.human_graded and abs(baseline_run.mean_score - baseline.mean_score) > 1e-9:
+            # The baseline is a snapshot, deliberately (models.Baseline), and a
+            # person has graded cases of its run since. Said, not silently
+            # resolved either way: the delta below is against the snapshot.
+            print(
+                f"warning: baseline {baseline.id} was set at a mean of {baseline.mean_score:.3f} "
+                f"but its run now reads {baseline_run.mean_score:.3f} "
+                f"({baseline_run.human_graded} case(s) graded by a person since); the delta "
+                f"below is taken against the snapshot. Set a new baseline "
+                f"(verdryx baseline {baseline_run.id}) to compare against the graded run",
+                file=sys.stderr,
+            )
         recent = store.list_runs(model=baseline_run.model, limit=args.window)
         if not recent:
             _die("no eval runs found to compare against the baseline")
@@ -493,6 +537,19 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
         try:
             report = compute_drift(
                 recent, baseline, threshold=args.threshold, baseline_run=baseline_run
+            )
+            # Written down and decided here, inside the store's block, from the
+            # stores alone: no model, no network. A fix registered earlier is
+            # judged by this same call, whatever the window's own verdict is.
+            finding_lines = findings_mod.process_drift(
+                store,
+                baseline=baseline,
+                baseline_run=baseline_run,
+                recent=recent,
+                threshold=args.threshold,
+                agent_id=agent_id,
+                now=datetime.now(tz=UTC),
+                report=report,
             )
         except ValueError as e:
             # compute_drift pools Scores per CASE across the window, so a
@@ -511,6 +568,12 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
     print(f"  mean score: {report.mean_score:.3f}")
     print(f"  baseline:   {baseline.mean_score:.3f}")
     print(f"  delta:      {report.delta:+.3f}")
+    graded = sum(r.human_graded for r in recent)
+    if graded:
+        cases = sum(len(r.scores) for r in recent)
+        print(
+            f"  human grades: {graded} of {cases} cases graded by a person (they outweigh the model)"
+        )
     if report.baseline_n:
         t_display = f"{report.t_statistic:.2f}" if report.t_statistic is not None else "n/a"
         print(f"  t-statistic: {t_display}  (n={report.baseline_n} baseline cases)")
@@ -518,6 +581,10 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
             f"  {DEFAULT_CONFIDENCE:.0%} CI on delta: [{report.ci_low:+.3f}, {report.ci_high:+.3f}]"
         )
     print(f"  verdict:    {report.verdict}\n")
+    for line in finding_lines:
+        print(f"  {line}")
+    if finding_lines:
+        print()
 
     if report.verdict == "regressed":
         events = _events_from_args(args.events)
@@ -618,6 +685,44 @@ def _scores_from_store(args: argparse.Namespace) -> list[dict[str, Any]] | None:
         return store.score_records()
 
 
+def _record_slo_findings(
+    args: argparse.Namespace,
+    report: Any,
+    records: list[dict[str, Any]],
+    scores: list[dict[str, Any]],
+    options: dict[str, Any],
+) -> None:
+    """Write the report's established breaches down as findings, and decide the
+    fixes registered against them. Needs a store: with none given, an
+    established breach says it was not recorded and how to record it, rather
+    than leaving the operator to wonder why `findings list` is empty."""
+    breaches = slo.established_breaches(report)
+    if not args.db:
+        if breaches:
+            print(
+                f"\n  {len(breaches)} established breach(es) not recorded as a finding: "
+                "pass --db PATH to keep them"
+            )
+        return
+
+    def recompute(rs: Any, sc: Any) -> Any:
+        return slo.compute_slo(rs, scores=sc, **options)
+
+    with Store.open(args.db) as store:
+        lines = findings_mod.process_slo(
+            store,
+            report,
+            records=records,
+            scores=scores,
+            recompute=recompute,
+            now=datetime.now(tz=UTC),
+        )
+    if lines:
+        print()
+        for line in lines:
+            print(f"  {line}")
+
+
 def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
     source = args.traces if args.traces else args.input
     records = load_run_records(source)
@@ -627,18 +732,17 @@ def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
         value = getattr(args, f"target_{name}", None)
         if value is not None:
             targets[name] = value
-    report = slo.compute_slo(
-        records,
-        scores=scores,
-        identity_field=args.identity_field,
-        window=args.window,
-        targets=targets or None,
-        confidence=args.confidence,
-        min_events=args.min_events,
-        good_outcomes=[o.strip() for o in args.good_outcomes.split(",") if o.strip()],
-        quality_floor=args.quality_floor,
-        cost_multiple=args.cost_multiple,
-    )
+    options: dict[str, Any] = {
+        "identity_field": args.identity_field,
+        "window": args.window,
+        "targets": targets or None,
+        "confidence": args.confidence,
+        "min_events": args.min_events,
+        "good_outcomes": [o.strip() for o in args.good_outcomes.split(",") if o.strip()],
+        "quality_floor": args.quality_floor,
+        "cost_multiple": args.cost_multiple,
+    }
+    report = slo.compute_slo(records, scores=scores, **options)
 
     print(f"\nAgent error budget -- {source}")
     print(
@@ -693,6 +797,8 @@ def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
         for line in report.blind_spots:
             print(f"    {line}")
 
+    _record_slo_findings(args, report, records, scores or [], options)
+
     payloads = slo.burn_events(report)
     print(
         f"\n  {len(payloads)} slo_burn event(s) to emit "
@@ -731,6 +837,160 @@ def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
                 f"and the envelope's only subject field is an agent id"
             )
     print()
+
+
+def _print_finding_row(f: Any) -> None:
+    kind = f"{f.kind}:{f.sli}" if f.sli else f.kind
+    print(
+        f"  {f.id[:8]}  {f.status:<11}  {kind:<28}  {f.agent_id or '(no agent id)'}  "
+        f"seen {f.seen_count}x, last {f.last_seen_at.isoformat(timespec='seconds')}"
+    )
+
+
+def _print_finding(f: Any) -> None:
+    print(f"\nFinding {f.id}\n")
+    print(f"  status:    {f.status}")
+    print(f"  kind:      {f.kind}" + (f" ({f.sli})" if f.sli else ""))
+    print(f"  agent:     {f.agent_id or '(no agent id)'}")
+    print(f"  window:    {f.window}")
+    print(
+        f"  opened:    {f.opened_at.isoformat(timespec='seconds')}   "
+        f"last seen: {f.last_seen_at.isoformat(timespec='seconds')}   seen {f.seen_count}x"
+    )
+    if f.closed_at:
+        print(f"  closed:    {f.closed_at.isoformat(timespec='seconds')}")
+    print(f"  suspect:   {f.suspect_note}")
+    print("  numbers:")
+    for name, value in f.detail.items():
+        shown = f"{value:.4f}" if isinstance(value, float) else str(value)
+        print(f"    {name}: {shown}")
+    print(f"  evidence ({len(f.evidence)}):")
+    for item in f.evidence:
+        print(f"    {item}")
+    if f.fixes:
+        print("  fixes:")
+        for n, fx in enumerate(f.fixes, 1):
+            version = f", version {fx.version}" if fx.version else ""
+            print(
+                f"    {n}. [{fx.status}] {fx.note}  (id {fx.id[:8]}{version}, registered "
+                f"{fx.registered_at.isoformat(timespec='seconds')})"
+            )
+            detail = fx.result.get("summary") or fx.result.get("reason")
+            if detail:
+                print(f"       {detail}")
+    print()
+
+
+def _cmd_findings(args: argparse.Namespace, config: Config) -> None:
+    if args.findings_cmd is None:
+        print("usage: verdryx findings {list,show,fix} ...", file=sys.stderr)
+        sys.exit(1)
+    db_path = args.db or config.db_path
+    with Store.open(db_path) as store:
+        if args.findings_cmd == "list":
+            statuses = {
+                "open": (STATUS_OPEN, STATUS_FIX_PENDING),
+                "closed": (STATUS_CLOSED,),
+                "all": tuple(FINDING_STATUSES),
+            }[args.status]
+            rows = store.list_findings(statuses, args.agent_id)
+            print(f"\nFindings ({args.status}) -- {db_path}\n")
+            if not rows:
+                print("  (none)")
+            for f in rows:
+                _print_finding_row(f)
+            print()
+            return
+        try:
+            finding_id = store.resolve_finding_id(args.finding)
+        except LookupError as e:
+            _die(str(e))
+        if args.findings_cmd == "show":
+            finding = store.get_finding(finding_id)
+            assert finding is not None
+            _print_finding(finding)
+            return
+        try:
+            fix = findings_mod.register_fix(
+                store,
+                finding_id,
+                args.note,
+                version=args.version,
+                now=datetime.now(tz=UTC),
+            )
+        except findings_mod.FixError as e:
+            _die(str(e))
+    print(f"\nFix {fix.id[:8]} registered for finding {finding_id[:8]}: the next run decides it\n")
+
+
+def _cmd_grade(args: argparse.Namespace, config: Config) -> None:
+    key_file = args.key_file or config.reviewer_key_file
+    if not key_file:
+        _die(
+            "no credential: pass --key-file PATH or set $VERDRYX_REVIEWER_KEY_FILE to the file "
+            "`verdryx principal add` wrote for this reviewer. The key is never accepted on "
+            "the command line, which would show in `ps`."
+        )
+    try:
+        key = _read_key_file(key_file)
+    except OSError as e:
+        _die(f"--key-file {key_file!r}: cannot read: {e}")
+    db_path = args.db or config.db_path
+    with Store.open(db_path) as store:
+        try:
+            grade = store.add_human_grade(
+                args.run_id,
+                args.case_id,
+                args.value,
+                author=args.author,
+                key=key,
+                note=args.note or "",
+            )
+        except GradeError as e:
+            _die(str(e))
+    print(
+        f"\nGraded {grade.case_id} of run {grade.run_id} as {grade.value:.2f} "
+        f"(author {grade.author}); it now outweighs the model's score\n"
+    )
+
+
+def _cmd_principal(args: argparse.Namespace, config: Config) -> None:
+    if args.principal_cmd is None:
+        print("usage: verdryx principal {add,list} ...", file=sys.stderr)
+        sys.exit(1)
+    db_path = args.db or config.db_path
+    with Store.open(db_path) as store:
+        if args.principal_cmd == "list":
+            print(f"\nPrincipals -- {db_path}\n")
+            for p in store.list_principals():
+                print(
+                    f"  {p.name:<24} {p.role:<9} registered {p.created_at.isoformat(timespec='seconds')}"
+                )
+            print()
+            return
+        key = new_key()
+        path = Path(args.key_out)
+        # Created exclusively and readable by its owner only, BEFORE the
+        # principal is registered: a path that already holds something is
+        # refused rather than overwritten, and a name already taken removes
+        # the file this call just wrote.
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            _die(f"{path} already exists: refusing to overwrite a key file")
+        except OSError as e:
+            _die(f"cannot write the key to {path}: {e}")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(key + "\n")
+        try:
+            store.add_principal(args.name, args.role, key)
+        except PrincipalError as e:
+            path.unlink(missing_ok=True)
+            _die(str(e))
+    print(
+        f"\nPrincipal {args.name} ({args.role}) registered. Its key is in {path} and nowhere "
+        "else: the store holds only a hash of it\n"
+    )
 
 
 def _get_version() -> str:
@@ -779,6 +1039,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="ID",
         help="evaluated agent's Passport id (agent://...); required for events to be emitted",
+    )
+    p_eval.add_argument(
+        "--agent-version",
+        default=None,
+        metavar="LABEL",
+        help=(
+            "which build of the agent this run is (a git sha, a prompt version, any label). "
+            "A finding names the version that changed, and a registered fix is tested only "
+            "by runs of the version it names"
+        ),
     )
     p_eval.add_argument(
         "--typed-url",
@@ -951,6 +1221,89 @@ def _build_parser() -> argparse.ArgumentParser:
         help="append slo_burn events here (also VERDRYX_EVENTS_PATH)",
     )
 
+    p_slo.add_argument(
+        "--db",
+        metavar="PATH",
+        default=None,
+        help=(
+            "SQLite store to record findings in, and to read the fixes registered against "
+            "them from. Without it an established breach is reported and not recorded; "
+            "--scores-db stays read-only"
+        ),
+    )
+
+    p_findings = sub.add_parser(
+        "findings", help="list, read and register fixes for the failures drift and slo recorded"
+    )
+    findings_sub = p_findings.add_subparsers(dest="findings_cmd")
+    p_f_list = findings_sub.add_parser("list", help="findings, most recently seen first")
+    p_f_list.add_argument("--db", default=None, metavar="PATH")
+    p_f_list.add_argument(
+        "--status",
+        choices=["open", "closed", "all"],
+        default="open",
+        help="open also lists findings with a fix pending (default: open)",
+    )
+    p_f_list.add_argument("--agent-id", default=None, metavar="ID")
+    p_f_show = findings_sub.add_parser("show", help="one finding in full")
+    p_f_show.add_argument("finding", metavar="ID", help="a finding id, or a unique prefix of one")
+    p_f_show.add_argument("--db", default=None, metavar="PATH")
+    p_f_fix = findings_sub.add_parser(
+        "fix", help="register a fix; the next runs decide whether it worked"
+    )
+    p_f_fix.add_argument("finding", metavar="ID", help="a finding id, or a unique prefix of one")
+    p_f_fix.add_argument("--note", required=True, metavar="TEXT", help="what was changed")
+    p_f_fix.add_argument(
+        "--version",
+        default=None,
+        metavar="LABEL",
+        help="the agent version the fix ships in; only eval runs of it can test the fix",
+    )
+    p_f_fix.add_argument("--db", default=None, metavar="PATH")
+
+    p_grade = sub.add_parser(
+        "grade", help="a reviewer's grade of one case; it outweighs the model's score"
+    )
+    p_grade.add_argument("run_id", help="the eval run the case belongs to")
+    p_grade.add_argument("case_id", help="the case to grade")
+    p_grade.add_argument("value", type=float, help="the grade, 0 to 1")
+    p_grade.add_argument("--author", required=True, metavar="NAME", help="the reviewer's name")
+    p_grade.add_argument(
+        "--key-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "file holding the reviewer's key (default: $VERDRYX_REVIEWER_KEY_FILE); "
+            "never accepted on the command line, which would show in `ps`"
+        ),
+    )
+    p_grade.add_argument("--note", default=None, metavar="TEXT", help="why, in a few words")
+    p_grade.add_argument("--db", default=None, metavar="PATH")
+
+    p_principal = sub.add_parser(
+        "principal", help="register who may write into the store besides a run"
+    )
+    principal_sub = p_principal.add_subparsers(dest="principal_cmd")
+    p_p_add = principal_sub.add_parser(
+        "add", help="register a name with a role; writes its generated key to a new file, once"
+    )
+    p_p_add.add_argument("name", help="the name grades will carry as their author")
+    p_p_add.add_argument(
+        "--role",
+        required=True,
+        choices=list(ROLES),
+        help="reviewer can grade cases; uploader only puts results in and can never grade",
+    )
+    p_p_add.add_argument(
+        "--key-out",
+        required=True,
+        metavar="PATH",
+        help="where to write the new key (created, mode 0600; an existing file is refused)",
+    )
+    p_p_add.add_argument("--db", default=None, metavar="PATH")
+    p_p_list = principal_sub.add_parser("list", help="the registered principals")
+    p_p_list.add_argument("--db", default=None, metavar="PATH")
+
     sub.add_parser("version", help="print the verdryx version")
 
     return parser
@@ -966,6 +1319,9 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace, Config], None]] = {
     "drift": _cmd_drift,
     "cost-per-correct": _cmd_cost_per_correct,
     "slo": _cmd_slo,
+    "findings": _cmd_findings,
+    "grade": _cmd_grade,
+    "principal": _cmd_principal,
     "version": _cmd_version,
 }
 

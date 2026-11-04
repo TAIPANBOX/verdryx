@@ -67,6 +67,12 @@ jobs:
       - name: every scenario is bound to a test that exists
         run: ./scripts/features-are-bound.sh
 
+      # A person's grade outweighs the model's, and whoever only uploads
+      # results must have no path to write one. A test proves the door is
+      # locked; this reads the package for a second door.
+      - name: a human grade has one door
+        run: ./scripts/human-grades-have-one-door.sh
+
       # Last, because it mutates tracked files and restores them. It needs a
       # clean tree and says so plainly, so it also reports any earlier step
       # that starts writing into the checkout.
