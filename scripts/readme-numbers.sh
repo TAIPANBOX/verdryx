@@ -61,7 +61,7 @@ fi
 # prints test IDs and this suite has tests with "error" in their names. A check
 # that fires on a passing repository is worse than no check: it teaches people
 # to ignore it.
-if printf '%s\n' "$out" | grep -qE '^!+ Interrupted|errors? during collection|^ERROR '; then
+if grep -qE '^!+ Interrupted|errors? during collection|^ERROR ' <<<"$out"; then
 	note "pytest reported errors during collection, so $actual is a floor and not the count"
 	printf '%s\n' "$out" | grep -E 'error|ModuleNotFound' | head -3
 	printf 'Install what CI installs: pip install -e ".[dev,traces]"\n'

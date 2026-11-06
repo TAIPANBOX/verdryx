@@ -266,7 +266,7 @@ if [ "$WANT_QWEN" -eq 1 ]; then
 		fi
 	else
 		OLLAMA_TAGS="$(curl -fsS http://127.0.0.1:11434/api/tags 2>/dev/null || true)"
-		if [ -z "$OLLAMA_TAGS" ] || ! printf '%s' "$OLLAMA_TAGS" | grep -q 'qwen2.5:7b'; then
+		if [ -z "$OLLAMA_TAGS" ] || ! grep -q 'qwen2.5:7b' <<<"$OLLAMA_TAGS"; then
 			echo "judge qwen: Ollama not reachable at 127.0.0.1:11434, or qwen2.5:7b not pulled (ollama pull qwen2.5:7b). Skipping." >&2
 		elif start_typryx qwen "$QWEN_PORT" "$QWEN_KEY" "$OUT/qwen" \
 			"TYPRYX_BACKEND=openai-logprobs" \
