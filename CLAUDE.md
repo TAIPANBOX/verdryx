@@ -53,6 +53,7 @@ pytest
 ./scripts/features-are-bound.sh
 ./scripts/lock-satisfies-pyproject.sh
 ./scripts/human-grades-have-one-door.sh
+./scripts/no-reader-leaves-a-pipe-early.sh  # invariant 16
 ./scripts/gates-have-teeth.sh   # invariant 7; needs a clean tree and the package installed
 pip-audit --skip-editable       # CI only; no ignored advisories, needs pip-audit installed
 ```
@@ -326,6 +327,8 @@ an absent invariant.
     bound; the stated behaviours were also each broken on purpose and a named
     test went red. Behavioural, so no gate script: a text check would not hold
     "verified needs a measurement".)*
+16. **A check says what the text holds, not which of a writer and its reader finished first.** `@claude 2026-11-06`, carried from stack-k8s#226 and stack-single#167; it records no decision of the owner. Under `set -o pipefail` a pipe into `grep -q` reports the writer too: grep leaves at its first match, a writer with more to write takes SIGPIPE, the pipeline returns 141, and a line that is there reads as missing. In the negative form, `if ... | grep -q bad`, the 141 reads as clean and a refused line passes. The rate follows the load on the machine. Here the places were `scripts/readme-numbers.sh` reading a test run's output, `examples/bakeoff/bakeoff.sh` and the teeth harness; this repository had not been seen to go red, and the rule is held before it does. Every such pipe in live shell code here moved, 3 in 3 files: to a here-string, `grep -q x <<<"$text"`, or to a pipe into `grep -c x >/dev/null`.
+    *(gate: `scripts/no-reader-leaves-a-pipe-early.sh`: a control that breaks a real pipe, known lines through the reader, then every tracked shell file and workflow `run:` step masked down to live code. It refuses to report OK on no shell file, no pipe, no step or a file it lost its place in. Eighteen cases in `scripts/gates-have-teeth.sh`. Not held: `| head`, the same race, which here takes a few lines from a writer of a few lines.)*
 
 ## Decisions that have no gate yet
 
