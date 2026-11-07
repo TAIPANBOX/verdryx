@@ -89,6 +89,22 @@
           "why": "stack-up runs it as a routine and stack-k8s as the quality-drift CronJob. The name in estate.json's `runs` is the routine's, not a script's, which is why it maps to a subcommand here."
         }
       }
+    },
+    {
+      "name": "verdryx-slo",
+      "class": "tool",
+      "checked": {
+        "console_script": "verdryx",
+        "entry_point": "verdryx.cli:main",
+        "subcommand": "slo",
+        "missing_argument_exit_code": 2
+      },
+      "declared": {
+        "it_is_the_scheduled_half": {
+          "value": "verdryx slo --traces <dir> --window 28d --holds-spend-no-budget",
+          "why": "stack-single runs it as the verdryx-slo service and stack-k8s as a sidecar of the gateway's pod, and wardryx reads the file it writes. The name in estate.json's `runs` is the routine's, not a script's, which is why it maps to a subcommand here."
+        }
+      }
     }
   ]
 }
