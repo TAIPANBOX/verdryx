@@ -105,7 +105,7 @@ flowchart TB
 
 - **Consumes**: outcome-tagged traces and records exported by **TokenFuse** (via `tokenfuse outcomes --json` or Parquet traces).
 - **Produces**: cost-per-correct metrics, quality scores, drift reports, and `source: verdryx` events.
-- **Talks to**: **TokenFuse** (its LLM judge can route through TokenFuse via `base_url`, and TokenFuse is the source of the traces Verdryx scores); **Wardryx** reads the `slo_burn` events in this plane's event file when `WARDRYX_SIGNAL_EVENTS` names it (Wardryx 2.5.0), and a policy of Wardryx's own can hold the agent's tool calls for a person while its error budget is spent.
+- **Talks to**: **TokenFuse** (its LLM judge can route through TokenFuse via `base_url`, and TokenFuse is the source of the traces Verdryx scores); **Wardryx** reads the `slo_burn` events in this plane's event file when `WARDRYX_SIGNAL_EVENTS` names it (Wardryx 2.5.0), and a policy of Wardryx's own can hold the agent's calls for a person while its error budget is spent.
 
 The full stack is TokenFuse (spend), Wardryx (policy), Vouchryx (delegation), Engram (memory), Idryx (access), Qryx (crypto), Verdryx (quality), Mockryx (pre-prod), scopyx (governed web egress), CostCrew (the bill), Trailryx (the record) and heraldyx (the mail out), on the shared Agent Passport + agent-event contract (agent-stack-go / agent-passport), configured via terraform-provider-taipan and driven from Genaryx, the console over all of it.
 
@@ -453,8 +453,8 @@ and there is no autonomy tier in this stack to demote one into. The reasons
 that is the honest shape rather than an unfinished one are in invariant 9 of
 CLAUDE.md. What a deployment adds on top is Wardryx's: it can read the
 `slo_burn` events this writes (`WARDRYX_SIGNAL_EVENTS`, off unless set) and a
-policy of its own that reads the signal can hold the agent's tool calls for a
-person while the budget is spent. That decision is Wardryx's, under its own
+policy of its own that reads the signal can hold the agent's calls for a person
+while the budget is spent. That decision is Wardryx's, under its own
 policy; this plane still writes no policy and holds nothing.
 
 **The window is real.** `--window` (default `28d`, a whole number of hours,
