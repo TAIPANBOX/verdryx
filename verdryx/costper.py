@@ -139,6 +139,11 @@ _BLOCKED_DECISIONS = frozenset(
 #: (invariant 4).
 _REFUSED_DECISIONS = frozenset({"wardryx_deny", "wardryx_hold"})
 
+#: The one refusal a person can lift. Counted among the refusals and, apart,
+#: as `held_calls`, because `verdryx slo --holds-spend-no-budget` has to tell
+#: "a person was asked" from "the call was refused".
+_HOLD_DECISION = "wardryx_hold"
+
 
 def _is_blocked_decision(decision: str) -> bool:
     """Whether `decision` is one of the nine Breaker block reasons."""
@@ -345,8 +350,8 @@ def read_parquet_runs(path: str | Path) -> list[dict[str, Any]]:
 
     The same one reduction, so a cost figure and a reliability figure can
     never describe two different scans of the same run. Adds `run_id`,
-    `agent_id`, `key_id`, `calls`, `refused_calls` and the first/last
-    `ts_millis` the run was seen at.
+    `agent_id`, `key_id`, `calls`, `refused_calls`, `held_calls` and the
+    first/last `ts_millis` the run was seen at.
 
     `refused_calls` counts the nine Breaker reasons AND the two Wardryx ones
     (`is_refused_decision`), which is deliberately a wider set than the one
@@ -378,6 +383,8 @@ def _reduce_call_rows(
     `run_id` column at all see the pre-reduction shape: one record per
     tagged call (an untagged, run_id-less row has nothing to fold into and
     never reaches this function -- see `read_parquet`).
+
+    `held_calls` is the part of `refused_calls` that is `wardryx_hold`.
     """
     with_run_id: list[_CallRow] = []
     without_run_id: list[_CallRow] = []
@@ -400,6 +407,7 @@ def _reduce_call_rows(
     # different scan of the same run.
     calls: dict[str, int] = {}
     refused: dict[str, int] = {}
+    held: dict[str, int] = {}
     identity: dict[str, tuple[str, str]] = {}
     first_ts: dict[str, int | None] = {}
     last_ts: dict[str, int | None] = {}
@@ -413,6 +421,8 @@ def _reduce_call_rows(
         calls[run_id] = calls.get(run_id, 0) + 1
         if is_refused_decision(row.decision):
             refused[run_id] = refused.get(run_id, 0) + 1
+        if row.decision == _HOLD_DECISION:
+            held[run_id] = held.get(run_id, 0) + 1
         # The LAST non-empty identity wins, matching how the outcome tag is
         # resolved, so a run whose first call arrived before the identity map
         # was consulted is described by what the gateway finally knew. An
@@ -442,6 +452,7 @@ def _reduce_call_rows(
                 "key_id": key_id,
                 "calls": calls.get(run_id, 0),
                 "refused_calls": refused.get(run_id, 0),
+                "held_calls": held.get(run_id, 0),
                 "first_ts_millis": first_ts.get(run_id),
                 "last_ts_millis": last_ts.get(run_id),
             }
@@ -457,6 +468,7 @@ def _reduce_call_rows(
                 "key_id": row.key_id,
                 "calls": 1,
                 "refused_calls": 1 if is_refused_decision(row.decision) else 0,
+                "held_calls": 1 if row.decision == _HOLD_DECISION else 0,
                 "first_ts_millis": row.ts_millis,
                 "last_ts_millis": row.ts_millis,
             }

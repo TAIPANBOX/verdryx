@@ -95,6 +95,12 @@ you disagree for your fleet, the flag is `--good-outcomes` and you can put
 own history. An agent that has been expensive since the day it shipped would
 otherwise be graded against its own habit and pass forever.
 
+`containment` counts a hold as well as a refusal, and a deployment whose policy
+plane holds an agent on these events has to turn that off, with
+`--holds-spend-no-budget`. A held call is written to the trace, so otherwise the
+hold spends the budget that caused it, and the agent can only recover by
+stopping work for a whole window.
+
 ## The budget goes negative
 
 Set the objective at 0.95 and you are saying 5% of runs may be bad. When 10%

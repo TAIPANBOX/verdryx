@@ -1074,6 +1074,164 @@ def _breaching_trace(pyarrow_and_parquet, tmp_path, agent_id, good=20, bad=20):
     return traces
 
 
+@pytest.fixture(autouse=True)
+def _the_clock_stands_beside_the_fixtures(monkeypatch):
+    """`verdryx slo` measures the runs inside its window, counted back from now,
+    and the traces in this file are dated 2025. Pinned, so a test reads the same
+    in any year; a test about the window itself moves it."""
+    monkeypatch.setattr("verdryx.cli._now_ms", lambda: 1_750_000_100_000)
+
+
+def _trace_of(pyarrow_and_parquet, tmp_path, agent_id, rows):
+    """A trace of `(run_id, decision, outcome, ts_millis)` rows, one call each."""
+    pa, pq = pyarrow_and_parquet
+    table = pa.table(
+        {
+            "run_id": [r[0] for r in rows],
+            "step": [0] * len(rows),
+            "outcome": [r[2] for r in rows],
+            "cost_microusd": [500] * len(rows),
+            "decision": [r[1] for r in rows],
+            "agent_id": [agent_id] * len(rows),
+            "key_id": [""] * len(rows),
+            "ts_millis": [r[3] for r in rows],
+        }
+    )
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    pq.write_table(table, traces / "calls-00000000.parquet")
+    return traces
+
+
+def test_slo_command_counts_only_the_runs_inside_the_window(
+    pyarrow_and_parquet, tmp_path, agent_id, capsys
+):
+    """`--window` was a label: the report took every run in the directory, so a
+    budget spent once stayed spent for as long as the trace was kept, and a hold
+    standing on it never ended. Found 2026-11-07 on forge, on a trace three weeks
+    deep that nothing had ever aged out."""
+    now = 1_750_000_100_000
+    old = now - 29 * 86_400_000
+    rows = [(f"old{i}", "wardryx_deny", "", old + i) for i in range(30)]
+    rows += [(f"new{i}", "allow", "case_resolved", now - 1000 - i) for i in range(30)]
+    traces = _trace_of(pyarrow_and_parquet, tmp_path, agent_id, rows)
+    events_path = tmp_path / "events.ndjson"
+
+    main(["slo", "--traces", str(traces), "--min-events", "10", "--events", str(events_path)])
+
+    out = capsys.readouterr().out
+    assert "runs=30" in out
+    assert "30 run(s) ended before the 28d window" in out
+    assert "0 slo_burn event(s)" in out
+    assert not events_path.exists() or not events_path.read_text()
+
+
+def test_slo_command_with_a_wider_window_counts_them_again(
+    pyarrow_and_parquet, tmp_path, agent_id, capsys
+):
+    """The other half of the test above: the same trace, a window that reaches
+    the old runs, and the breach is back. Without it, the test above would pass
+    on a command that dropped every refusal."""
+    now = 1_750_000_100_000
+    old = now - 29 * 86_400_000
+    rows = [(f"old{i}", "wardryx_deny", "", old + i) for i in range(30)]
+    rows += [(f"new{i}", "allow", "case_resolved", now - 1000 - i) for i in range(30)]
+    traces = _trace_of(pyarrow_and_parquet, tmp_path, agent_id, rows)
+
+    main(["slo", "--traces", str(traces), "--min-events", "10", "--window", "30d"])
+
+    out = capsys.readouterr().out
+    assert "runs=60" in out
+    assert "ended before" not in out
+    assert "0 slo_burn event(s)" not in out
+
+
+def test_slo_command_with_nothing_inside_the_window_says_so_and_writes_nothing(
+    pyarrow_and_parquet, tmp_path, agent_id, capsys, monkeypatch
+):
+    """A routine runs this on a quiet box. A quiet box is not an error."""
+    traces = _breaching_trace(pyarrow_and_parquet, tmp_path, agent_id)
+    events_path = tmp_path / "events.ndjson"
+    monkeypatch.setattr("verdryx.cli._now_ms", lambda: 1_750_010_000_000)
+
+    main(
+        [
+            "slo",
+            "--traces",
+            str(traces),
+            "--window",
+            "1h",
+            "--events",
+            str(events_path),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert "runs=0" in out
+    assert "40 run(s) ended before the 1h window" in out
+    assert not events_path.exists() or not events_path.read_text()
+
+
+def test_slo_command_refuses_a_window_it_cannot_read(
+    pyarrow_and_parquet, tmp_path, agent_id, capsys
+):
+    """A label nobody can read would be the old behaviour under a new name: a
+    report over the whole directory that says it is a report over a window."""
+    traces = _breaching_trace(pyarrow_and_parquet, tmp_path, agent_id)
+
+    with pytest.raises(SystemExit):
+        main(["slo", "--traces", str(traces), "--window", "a month"])
+
+    assert "a month" in capsys.readouterr().err
+
+
+def test_slo_command_leaves_scores_outside_the_window_out_too(
+    pyarrow_and_parquet, sample_evalset_path, tmp_path, agent_id, capsys, monkeypatch
+):
+    """Both streams answer to one window, or the quality floor would be measured
+    over a span the other three indicators are not."""
+    traces = _breaching_trace(pyarrow_and_parquet, tmp_path, agent_id)
+    db = tmp_path / "q.db"
+    main(
+        [
+            "eval",
+            str(sample_evalset_path),
+            "--model",
+            "stub",
+            "--db",
+            str(db),
+            "--agent-id",
+            agent_id,
+        ]
+    )
+    capsys.readouterr()
+    monkeypatch.setattr("verdryx.cli._now_ms", lambda: 4_000_000_000_000)
+
+    main(["slo", "--traces", str(traces), "--scores-db", str(db), "--min-events", "1"])
+
+    out = capsys.readouterr().out
+    assert "joined from" not in out
+    assert "score(s) ended before the 28d window" in out
+
+
+def test_slo_command_sets_holds_apart_when_told(pyarrow_and_parquet, tmp_path, agent_id, capsys):
+    """The two runs of one trace: a hold spends the budget unless the operator
+    says otherwise, and with the flag the same trace emits nothing."""
+    now = 1_750_000_100_000
+    rows = [(f"r{i}", "wardryx_hold", "", now - 1000 - i) for i in range(40)]
+    traces = _trace_of(pyarrow_and_parquet, tmp_path, agent_id, rows)
+
+    main(["slo", "--traces", str(traces), "--min-events", "10"])
+    counted = capsys.readouterr().out
+    main(["slo", "--traces", str(traces), "--min-events", "10", "--holds-spend-no-budget"])
+    set_apart = capsys.readouterr().out
+
+    assert "0 slo_burn event(s)" not in counted
+    assert "0 slo_burn event(s)" in set_apart
+    assert "a wardryx hold spends no budget" in set_apart
+    assert "a wardryx hold spends no budget" not in counted
+
+
 def test_slo_command_writes_the_burn_events_it_counted(
     pyarrow_and_parquet, tmp_path, agent_id, capsys
 ) -> None:

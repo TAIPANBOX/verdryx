@@ -330,6 +330,24 @@ an absent invariant.
 16. **A check says what the text holds, not which of a writer and its reader finished first.** `@claude 2026-11-06`, carried from stack-k8s#226 and stack-single#167; it records no decision of the owner. Under `set -o pipefail` a pipe into `grep -q` reports the writer too: grep leaves at its first match, a writer with more to write takes SIGPIPE, the pipeline returns 141, and a line that is there reads as missing. In the negative form, `if ... | grep -q bad`, the 141 reads as clean and a refused line passes. The rate follows the load on the machine. Here the places were `scripts/readme-numbers.sh` reading a test run's output, `examples/bakeoff/bakeoff.sh` and the teeth harness; this repository had not been seen to go red, and the rule is held before it does. Every such pipe in live shell code here moved, 3 in 3 files: to a here-string, `grep -q x <<<"$text"`, or to a pipe into `grep -c x >/dev/null`.
     *(gate: `scripts/no-reader-leaves-a-pipe-early.sh`: a control that breaks a real pipe, known lines through the reader, then every tracked shell file and workflow `run:` step masked down to live code. It refuses to report OK on no shell file, no pipe, no step or a file it lost its place in. Eighteen cases in `scripts/gates-have-teeth.sh`. Not held: `| head`, the same race, which here takes a few lines from a writer of a few lines.)*
 
+16. **`verdryx slo` measures its window, and a hold it causes need not spend
+    its budget.** `@decided 2026-11-07` (paraphrased): an agent whose error budget
+    is spent is held for a person, in both stacks. `@claude` 2026-11-07, what that
+    needed here, found by running the command on a real trace on forge: `--window`
+    was a label, so every run in the directory counted for as long as the trace
+    was kept, and a hold standing on that never ended; and `wardryx_hold` is a
+    refusal to `containment`, so a held call spent the budget that caused the
+    hold, and an agent still working could never earn it back. `--window` now
+    drops runs and scores that ended before it (`slo.runs_in_window`; a row with
+    no time stays in and is counted; a window that cannot be read is refused).
+    `--holds-spend-no-budget` sets `held_calls`, the `wardryx_hold` part of
+    `refused_calls`, apart from `containment`; it is a switch because the trace
+    says a call was held and not which rule held it, and the report's default is
+    unchanged. *(test: `test_slo_command_counts_only_the_runs_inside_the_window`,
+    `test_slo_command_with_a_wider_window_counts_them_again`,
+    `test_a_hold_spends_no_budget_when_told_so`,
+    `test_a_run_a_deny_stopped_still_spends_the_budget_when_holds_do_not`.)*
+
 ## Decisions that have no gate yet
 
 This list is debt, and it is here to stay visible rather than to be tidy.

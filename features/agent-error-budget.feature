@@ -157,3 +157,58 @@ Feature: When is an agent reliable enough
     Then the report shows it against that credential
     And no event is sent, because the envelope's only subject is an agent id
     And nothing malformed is written in its place
+
+  # @test:test_slo_command_counts_only_the_runs_inside_the_window
+  # @test:test_slo_command_with_a_wider_window_counts_them_again
+  Scenario: A bad spell stops counting once the window has passed it
+    Given an agent refused many times more than a window ago, and clean since
+    When the report is produced over that window
+    Then the old runs are in no subject's numbers and the budget is not spent
+    And the report says how many runs it left out
+    And a window wide enough to reach them finds the breach again
+
+  # @test:test_a_run_with_no_time_stays_in_and_is_counted
+  Scenario: A run nobody can date is not called old
+    Given a run that carries no time
+    When the window is applied
+    Then the run stays in the numbers
+    And the report says how many runs the window could not be applied to
+
+  # @test:test_slo_command_refuses_a_window_it_cannot_read
+  Scenario: A window nobody can read is refused rather than ignored
+    Given a window that is not a number of hours, days or weeks
+    When the report is asked for
+    Then the command refuses and names what it was given
+
+  # @test:test_slo_command_with_nothing_inside_the_window_says_so_and_writes_nothing
+  Scenario: A quiet box is not an error
+    Given a trace with nothing inside the window
+    When the report is produced
+    Then it says so and sends no event
+
+  # @test:test_slo_command_leaves_scores_outside_the_window_out_too
+  Scenario: The scores answer to the same window as the runs
+    Given eval scores older than the window
+    When the report joins them
+    Then they are in no subject's numbers and the report says how many
+
+  # @test:test_a_hold_spends_no_budget_when_told_so
+  # @test:test_slo_command_sets_holds_apart_when_told
+  Scenario: A hold does not spend the budget that caused it
+    Given a deployment that puts an agent on hold while its budget is spent
+    And the agent's runs are stopped by that hold and by nothing else
+    When the report is told holds spend no budget
+    Then containment is met and no event is sent
+    And the report says holds were set apart
+
+  # @test:test_a_run_a_deny_stopped_still_spends_the_budget_when_holds_do_not
+  Scenario: Setting holds apart does not set refusals apart
+    Given a run that was held and also refused
+    When the report is told holds spend no budget
+    Then the refusal still spends the budget
+
+  # @test:test_a_hold_counts_as_a_refusal_unless_told_otherwise
+  Scenario: Without the switch a hold is still something that stopped the run
+    Given an agent held on every run
+    When the report is produced with no switch
+    Then containment reads those runs as stopped

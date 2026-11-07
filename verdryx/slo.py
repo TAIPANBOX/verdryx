@@ -74,6 +74,7 @@ not, which is the failure this whole plane exists to end.
 from __future__ import annotations
 
 import math
+import re
 import statistics
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -299,11 +300,22 @@ def _sli_containment(run: Mapping[str, Any], cfg: Mapping[str, Any]) -> bool | N
     `wardryx_hold` are written to the trace, return 403, and are NOT
     `BreakerReason`s, so the nine alone would report a fleet as unrestrained
     while the policy plane refused half its calls.
+
+    With `holds_spend_budget` off, a hold is a person being asked and not a
+    refusal, so a run only a hold stopped meets the objective. That is for a
+    deployment where this report's own `slo_burn` events put an agent on hold:
+    a held call is written to the trace, so a hold that spends budget spends
+    the very budget that caused it, and an agent still working can never earn
+    it back. The trace records that a call was held, not which rule held it, so
+    the switch sets every hold apart.
     """
     refused = run.get("refused_calls")
     if refused is None:
         return None
-    return int(refused) == 0
+    stopped = int(refused)
+    if not cfg["holds_spend_budget"]:
+        stopped -= int(run.get("held_calls") or 0)
+    return stopped == 0
 
 
 def _sli_cost_discipline(run: Mapping[str, Any], cfg: Mapping[str, Any]) -> bool | None:
@@ -365,6 +377,55 @@ def cost_reference(runs: Iterable[Mapping[str, Any]]) -> float | None:
     if not positive:
         return None
     return statistics.median(positive)
+
+
+_WINDOW_UNIT_MILLIS = {"h": 3_600_000, "d": 86_400_000, "w": 604_800_000}
+_WINDOW = re.compile(r"([1-9][0-9]*)([hdw])")
+
+
+def parse_window(window: str) -> int:
+    """`28d`, `6h` or `2w` as milliseconds.
+
+    Refuses anything else. A label that cannot be read would be a report over
+    the whole input calling itself a report over a window, which is what
+    `--window` was until 2026-11-07.
+    """
+    match = _WINDOW.fullmatch(window)
+    if match is None:
+        raise SloInputError(
+            f"window must be a whole number of hours, days or weeks, such as 28d, 6h "
+            f"or 2w, got {window!r}"
+        )
+    return int(match[1]) * _WINDOW_UNIT_MILLIS[match[2]]
+
+
+def runs_in_window(
+    rows: Iterable[Mapping[str, Any]], window_millis: int, now_millis: int
+) -> tuple[list[Mapping[str, Any]], int, int]:
+    """The rows that ended inside the window, how many did not, and how many
+    carry no time.
+
+    Without this a budget spent once stays spent for as long as the trace is
+    kept, and nothing ages a trace out. A row with no time stays in and is
+    counted: nothing says it is old, so leaving it out would be a guess, and a
+    fleet would score better the less of its trace carries a clock.
+
+    The same function takes the runs and the scores, which share the field.
+    """
+    cutoff = now_millis - window_millis
+    kept: list[Mapping[str, Any]] = []
+    dropped = 0
+    unstamped = 0
+    for row in rows:
+        stamp = row.get("last_ts_millis")
+        if stamp is None:
+            unstamped += 1
+            kept.append(row)
+        elif int(stamp) >= cutoff:
+            kept.append(row)
+        else:
+            dropped += 1
+    return kept, dropped, unstamped
 
 
 def _recent_burn(
@@ -502,6 +563,7 @@ def compute_slo(
     cost_multiple: float = DEFAULT_COST_MULTIPLE,
     burn_window_fraction: float = BURN_WINDOW_FRACTION,
     min_burn_events: int = 5,
+    holds_spend_budget: bool = True,
 ) -> SloReport:
     """Measure every indicator over every subject in `records`.
 
@@ -585,6 +647,7 @@ def compute_slo(
         "cost_multiple": cost_multiple,
         "burn_window_fraction": burn_window_fraction,
         "min_burn_events": min_burn_events,
+        "holds_spend_budget": holds_spend_budget,
         # Computed over the WHOLE input rather than per subject, which is what
         # makes it a fleet reference. Recomputing it inside each group would
         # compare every agent to itself and pass all of them.
