@@ -558,3 +558,116 @@ def test_no_scores_supplied_leaves_the_report_exactly_as_it_was():
     assert report.unattributed_scores == 0
     m = _find(report, "agent://acme.example/support/bot", slo.SLI_QUALITY_FLOOR)
     assert m.measured is False
+
+
+# ------------------------------------------------- the window and a hold's cost
+
+NOW = 1_800_000_000_000
+DAY = 86_400_000
+
+
+def test_window_parses_hours_days_and_weeks_and_nothing_else():
+    assert slo.parse_window("28d") == 28 * DAY
+    assert slo.parse_window("6h") == 6 * 3_600_000
+    assert slo.parse_window("2w") == 14 * DAY
+    for bad in ("", "28", "d", "0d", "-1d", "1.5d", "28 d", "1m", "28days"):
+        with pytest.raises(slo.SloInputError):
+            slo.parse_window(bad)
+
+
+def test_only_the_runs_inside_the_window_are_kept_and_the_rest_are_counted():
+    """A report that takes the whole directory never lets a budget recover: a
+    bad afternoon a year ago stays in the numbers, and a hold that stands on
+    those numbers never ends."""
+    inside = [_run(run_id="in", last_ts_millis=NOW - DAY)]
+    edge = [_run(run_id="edge", last_ts_millis=NOW - 28 * DAY)]
+    outside = [_run(run_id="out", last_ts_millis=NOW - 28 * DAY - 1)]
+
+    kept, dropped, unstamped = slo.runs_in_window(inside + edge + outside, 28 * DAY, NOW)
+
+    assert [r["run_id"] for r in kept] == ["in", "edge"]
+    assert dropped == 1
+    assert unstamped == 0
+
+
+def test_a_run_with_no_time_stays_in_and_is_counted():
+    """Nothing says such a run is old, so dropping it would be a guess, and a
+    fleet would score better the less of its trace carries a clock."""
+    kept, dropped, unstamped = slo.runs_in_window([_run(run_id="n")], 28 * DAY, NOW)
+
+    assert [r["run_id"] for r in kept] == ["n"]
+    assert dropped == 0
+    assert unstamped == 1
+
+
+def test_a_hold_counts_as_a_refusal_unless_told_otherwise():
+    """The report's own default is unchanged: something stopped this run."""
+    report = slo.compute_slo(_runs(40, refused_calls=1, held_calls=1))
+
+    m = _find(report, "agent://acme.example/support/bot", slo.SLI_CONTAINMENT)
+    assert m.observed == 0.0
+
+
+def test_a_hold_spends_no_budget_when_told_so():
+    """With the wardryx signal on, a spent budget holds the agent, and a held
+    call is written to the trace as `wardryx_hold`. Counted as a refusal, the
+    hold spends more of the budget that caused it, so an agent still working
+    can never earn it back."""
+    report = slo.compute_slo(_runs(40, refused_calls=1, held_calls=1), holds_spend_budget=False)
+
+    m = _find(report, "agent://acme.example/support/bot", slo.SLI_CONTAINMENT)
+    assert m.observed == 1.0
+    assert not slo.burn_events(report)
+
+
+def test_a_run_a_deny_stopped_still_spends_the_budget_when_holds_do_not():
+    """Setting holds apart must not set refusals apart: this is the mutant that
+    reads `held_calls` as "ignore the run"."""
+    report = slo.compute_slo(_runs(40, refused_calls=2, held_calls=1), holds_spend_budget=False)
+
+    m = _find(report, "agent://acme.example/support/bot", slo.SLI_CONTAINMENT)
+    assert m.observed == 0.0
+
+
+def test_a_record_with_no_held_count_reads_as_no_holds():
+    """A hand-written export has no such field, and it must not fall over."""
+    report = slo.compute_slo(_runs(40, refused_calls=1), holds_spend_budget=False)
+
+    m = _find(report, "agent://acme.example/support/bot", slo.SLI_CONTAINMENT)
+    assert m.observed == 0.0
+
+
+def test_the_reduction_counts_holds_apart_and_inside_the_refusals():
+    rows = [
+        _CallRow(
+            run_id="r",
+            step=i,
+            outcome="",
+            cost_usd=0.0,
+            decision=d,
+            agent_id="agent://acme.example/support/bot",
+            key_id="",
+            ts_millis=i,
+        )
+        for i, d in enumerate(["wardryx_hold", "wardryx_deny", "allow", "wardryx_hold"])
+    ]
+
+    record = _reduce_call_rows(rows)[0]
+
+    assert record["refused_calls"] == 3
+    assert record["held_calls"] == 2
+
+
+def test_a_row_with_no_run_id_counts_its_hold_too():
+    row = _CallRow(
+        run_id=None,
+        step=0,
+        outcome="",
+        cost_usd=0.0,
+        decision="wardryx_hold",
+        agent_id="a",
+        key_id="",
+        ts_millis=1,
+    )
+
+    assert _reduce_call_rows([row])[0]["held_calls"] == 1

@@ -723,10 +723,25 @@ def _record_slo_findings(
             print(f"  {line}")
 
 
+def _now_ms() -> int:
+    """The clock `verdryx slo` counts its window back from."""
+    return int(datetime.now(tz=UTC).timestamp() * 1000)
+
+
 def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
     source = args.traces if args.traces else args.input
-    records = load_run_records(source)
+    try:
+        window_millis = slo.parse_window(args.window)
+    except slo.SloInputError as exc:
+        _die(str(exc))
+    now_millis = _now_ms()
+    records, runs_before, runs_no_time = slo.runs_in_window(
+        load_run_records(source), window_millis, now_millis
+    )
     scores = _scores_from_store(args)
+    scores_before = 0
+    if scores is not None:
+        scores, scores_before, _ = slo.runs_in_window(scores, window_millis, now_millis)
     targets = {}
     for name in slo.SLI_NAMES:
         value = getattr(args, f"target_{name}", None)
@@ -741,6 +756,7 @@ def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
         "good_outcomes": [o.strip() for o in args.good_outcomes.split(",") if o.strip()],
         "quality_floor": args.quality_floor,
         "cost_multiple": args.cost_multiple,
+        "holds_spend_budget": not args.holds_spend_no_budget,
     }
     report = slo.compute_slo(records, scores=scores, **options)
 
@@ -750,6 +766,19 @@ def _cmd_slo(args: argparse.Namespace, config: Config) -> None:
         f"runs={report.total_runs}  identity={report.identity_field}"
     )
     print(f"  ({slo.IDENTITY_NOTES[report.identity_field]})")
+    if runs_before:
+        print(f"  {runs_before} run(s) ended before the {report.window} window and are left out")
+    if scores_before:
+        print(
+            f"  {scores_before} score(s) ended before the {report.window} window and are left out"
+        )
+    if runs_no_time:
+        print(
+            f"  {runs_no_time} run(s) carry no time, so the window cannot be applied to them: "
+            "they are kept"
+        )
+    if args.holds_spend_no_budget:
+        print("  a wardryx hold spends no budget: containment counts the other refusals")
     if report.cost_reference_usd is not None:
         print(f"  fleet median run cost: ${report.cost_reference_usd:.6f}")
     if report.unattributed_runs:
@@ -1155,7 +1184,24 @@ def _build_parser() -> argparse.ArgumentParser:
             "keys are configured (default: agent_id)"
         ),
     )
-    p_slo.add_argument("--window", default="28d", help="the window label to report (default: 28d)")
+    p_slo.add_argument(
+        "--window",
+        default="28d",
+        help=(
+            "measure the runs and scores that ended this long ago or later: a whole "
+            "number of hours, days or weeks, such as 6h, 28d or 2w (default: 28d)"
+        ),
+    )
+    p_slo.add_argument(
+        "--holds-spend-no-budget",
+        action="store_true",
+        help=(
+            "a run only a wardryx hold stopped meets containment. For a deployment "
+            "whose wardryx holds an agent on the slo_burn events this command writes: "
+            "otherwise each held call spends the budget that caused the hold, and an "
+            "agent still working can never earn it back"
+        ),
+    )
     p_slo.add_argument(
         "--confidence",
         type=float,

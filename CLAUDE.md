@@ -327,6 +327,24 @@ an absent invariant.
     test went red. Behavioural, so no gate script: a text check would not hold
     "verified needs a measurement".)*
 
+16. **`verdryx slo` measures its window, and a hold it causes need not spend
+    its budget.** `@decided 2026-11-07` (paraphrased): an agent whose error budget
+    is spent is held for a person, in both stacks. `@claude` 2026-11-07, what that
+    needed here, found by running the command on a real trace on forge: `--window`
+    was a label, so every run in the directory counted for as long as the trace
+    was kept, and a hold standing on that never ended; and `wardryx_hold` is a
+    refusal to `containment`, so a held call spent the budget that caused the
+    hold, and an agent still working could never earn it back. `--window` now
+    drops runs and scores that ended before it (`slo.runs_in_window`; a row with
+    no time stays in and is counted; a window that cannot be read is refused).
+    `--holds-spend-no-budget` sets `held_calls`, the `wardryx_hold` part of
+    `refused_calls`, apart from `containment`; it is a switch because the trace
+    says a call was held and not which rule held it, and the report's default is
+    unchanged. *(test: `test_slo_command_counts_only_the_runs_inside_the_window`,
+    `test_slo_command_with_a_wider_window_counts_them_again`,
+    `test_a_hold_spends_no_budget_when_told_so`,
+    `test_a_run_a_deny_stopped_still_spends_the_budget_when_holds_do_not`.)*
+
 ## Decisions that have no gate yet
 
 This list is debt, and it is here to stay visible rather than to be tidy.

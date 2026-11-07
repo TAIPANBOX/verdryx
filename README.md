@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB.svg)
-![tests](https://img.shields.io/badge/tests-739-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-754-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/phase-1%20(mvp)-success.svg)
 
@@ -456,6 +456,20 @@ CLAUDE.md. What a deployment adds on top is Wardryx's: it can read the
 policy of its own that reads the signal can hold the agent's tool calls for a
 person while the budget is spent. That decision is Wardryx's, under its own
 policy; this plane still writes no policy and holds nothing.
+
+**The window is real.** `--window` (default `28d`, a whole number of hours,
+days or weeks) leaves out every run and score that ended before it, and the
+report says how many, so a bad spell stops counting once the window has passed
+it. A run that carries no time stays in and is counted, because nothing says it
+is old. A window that cannot be read is refused.
+
+**A hold need not spend the budget that caused it.** To `containment` a held
+call is a refusal, which is right for a report and wrong for a deployment where
+these events put the agent on hold: each held call would spend more of the
+budget, and an agent still working could never earn it back. Run the command
+with `--holds-spend-no-budget` there. A run only a hold stopped then meets
+containment, and every other refusal still counts. The trace records that a call
+was held, not which rule held it, so the switch sets every hold apart.
 
 Three things it will not do, each on purpose. It sends no event unless the
 confidence interval's upper bound sits below the objective, so a shortfall
