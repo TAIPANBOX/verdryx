@@ -211,6 +211,11 @@ class PriceBook:
             # `.with_price(...)` calls, and a loop would hide them from it.
             # The comment above each family is tokenfuse's own, verbatim.
             #
+            # Claude Fable 5.2: 8 / 40, cache hits 0.20, writes 10 / 16.
+            .with_price("claude-fable-5-2", ModelPrice(8.00, 40.00, 0.20, 10.00))
+            # Regional or endpoint-unnamed ids: list plus 10 percent.
+            .with_price("anthropic.claude-fable-5-2", ModelPrice(8.80, 44.00, 0.22, 11.00))
+            #
             # Claude Fable 5.1: 10 / 50, cache hits 0.25 (0.025x), writes 12.50 / 20.
             .with_price("claude-fable-5-1", ModelPrice(10.00, 50.00, 0.25, 12.50))
             # Regional or endpoint-unnamed ids: list plus 10 percent.
