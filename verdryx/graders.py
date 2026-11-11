@@ -358,7 +358,7 @@ class ToolTraceGrader:
     list of tool names rather than free text. verdryx.cli's eval loop
     dispatches GraderKind.TOOL_TRACE cases here through `grade_trace()`
     specially, instead of through the shared `grade(case, output)` shape
-    the other four graders use; build_graders() still registers a
+    the other five graders use; build_graders() still registers a
     ToolTraceGrader unconditionally in the same dict, since -- unlike
     LLMJudgeGrader -- it needs no adapter of its own to construct.
 

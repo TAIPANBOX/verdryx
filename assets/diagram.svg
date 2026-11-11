@@ -20,10 +20,12 @@
 
           <text x="420" y="70" fill="#8A97A6" font-size="10">graders</text>
           <g font-size="10" fill="#E9EFF6">
-            <rect x="260" y="78" width="76" height="28" rx="8" fill="#141C27" stroke="#2a3547"/><text x="298" y="96">exact</text>
-            <rect x="344" y="78" width="76" height="28" rx="8" fill="#141C27" stroke="#2a3547"/><text x="382" y="96">regex</text>
-            <rect x="428" y="78" width="80" height="28" rx="8" fill="#141C27" stroke="#2a3547"/><text x="468" y="96">outcome-tag</text>
-            <rect x="516" y="78" width="64" height="28" rx="8" fill="#141C27" stroke="#FF7AA2"/><text x="548" y="96" fill="#FF7AA2">judge</text>
+            <rect x="250" y="78" width="44" height="28" rx="8" fill="#141C27" stroke="#2a3547"/><text x="272" y="96">exact</text>
+            <rect x="298" y="78" width="46" height="28" rx="8" fill="#141C27" stroke="#2a3547"/><text x="321" y="96">regex</text>
+            <rect x="348" y="78" width="72" height="28" rx="8" fill="#141C27" stroke="#2a3547"/><text x="384" y="96">outcome-tag</text>
+            <rect x="424" y="78" width="46" height="28" rx="8" fill="#141C27" stroke="#FF7AA2"/><text x="447" y="96" fill="#FF7AA2">judge</text>
+            <rect x="474" y="78" width="66" height="28" rx="8" fill="#141C27" stroke="#2a3547"/><text x="507" y="96">tool-trace</text>
+            <rect x="544" y="78" width="46" height="28" rx="8" fill="#141C27" stroke="#2a3547"/><text x="567" y="96">typed</text>
           </g>
           <text x="420" y="120" fill="#5A6675" font-size="10.5">the judge&#8217;s calls are priced too</text>
 
