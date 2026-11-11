@@ -10,7 +10,7 @@
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/phase-1%20(mvp)-success.svg)
 
-<img src="docs/architecture.png" alt="Verdryx architecture: eval sets, TokenFuse traces and outcome exports flow through four graders into the eval store, out as drift reports, cost-per-outcome and quality events" width="960">
+<img src="docs/architecture.png" alt="Verdryx architecture: eval sets, TokenFuse traces and outcome exports flow through six graders into the eval store, out as drift reports, cost-per-outcome and quality events" width="960">
 
 </div>
 
@@ -34,7 +34,7 @@ offensive-security tool.
 
 <div align="center">
 
-<img src="assets/diagram.svg" alt="Verdryx architecture: TokenFuse Parquet traces, outcome exports and eval sets pass through four graders into the eval store, and out as drift reports, cost per resolved outcome and quality events" width="960">
+<img src="assets/diagram.svg" alt="Verdryx architecture: TokenFuse Parquet traces, outcome exports and eval sets pass through six graders into the eval store, and out as drift reports, cost per resolved outcome and quality events" width="960">
 
 <sub>The same service as its room on <a href="https://it-rat.com/services/verdryx.html">it-rat.com</a> draws it, where the diagram sits next to a simulation you can scrub back and forth.</sub>
 
@@ -202,8 +202,9 @@ protocol (`complete()`, `judge()` and `complete_with_tools()`). Two are provided
   hitting Anthropic directly. Its `judge()` calls also price themselves
   against `verdryx.pricing.PriceBook` (a Python port of TokenFuse's own
   default price book), so an `llm_judge` case's `Score.cost_usd` is a real
-  dollar figure, not the `0.0` placeholder the other three graders leave in
-  place (they make no model call, so there is nothing to price).
+  dollar figure, not the `0.0` placeholder the exact, regex, outcome-tag and
+  tool-trace graders leave in place (they make no model call, so there is
+  nothing to price).
 
 The candidate output a judge grades is wrapped in an `<output-...>` block with an
 instruction to treat it as inert data, the same delimited-block technique

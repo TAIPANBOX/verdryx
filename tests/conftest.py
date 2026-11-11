@@ -40,7 +40,7 @@ def event_schema_v1_0() -> dict[str, Any]:
 
 @pytest.fixture()
 def sample_evalset() -> EvalSet:
-    """A small eval set covering all four grader kinds.
+    """A small eval set covering the exact, regex, outcome_tag and llm_judge grader kinds.
 
     StubLLMAdapter's defaults (completion="stub output", judge_value=1.0)
     score every case here as a perfect match, so a run over this set with a
