@@ -115,6 +115,7 @@ def test_price_book_unknown_model_with_fallback_resolves_via_fallback() -> None:
 _EXPECTED_DEFAULT_ENTRIES = [
     ("anthropic.claude-fable-5", 11.00, 55.00, 1.10, 13.75),
     ("anthropic.claude-fable-5-1", 11.00, 55.00, 0.275, 13.75),
+    ("anthropic.claude-fable-5-2", 8.80, 44.00, 0.22, 11.00),
     ("anthropic.claude-haiku-4-5", 1.10, 5.50, 0.11, 1.375),
     ("anthropic.claude-haiku-4-5-20251001-v1:0", 1.10, 5.50, 0.11, 1.375),
     ("anthropic.claude-haiku-5-5", 0.11, 0.55, 0.011, 0.1375),
@@ -138,6 +139,7 @@ _EXPECTED_DEFAULT_ENTRIES = [
     ("apac.anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
     ("claude-fable-5", 10.00, 50.00, 1.00, 12.50),
     ("claude-fable-5-1", 10.00, 50.00, 0.25, 12.50),
+    ("claude-fable-5-2", 8.00, 40.00, 0.20, 10.00),
     ("claude-haiku", 0.80, 4.00, 0.08, 1.00),
     ("claude-haiku-4-5", 1.00, 5.00, 0.10, 1.25),
     ("claude-haiku-4-5-20251001", 1.00, 5.00, 0.10, 1.25),
@@ -420,6 +422,7 @@ def test_openrouter_openai_id_is_priced_at_the_openai_row(model: str) -> None:
 #: helper in crates/gateway/src/pricebook.rs); a typo in one hand-written
 #: rate shows here as a ratio that is not 1.1.
 _REGIONAL_PAIRS = [
+    ("anthropic.claude-fable-5-2", "claude-fable-5-2"),
     ("anthropic.claude-fable-5-1", "claude-fable-5-1"),
     ("anthropic.claude-fable-5", "claude-fable-5"),
     ("anthropic.claude-opus-5-5", "claude-opus-5-5"),
