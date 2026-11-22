@@ -204,6 +204,8 @@ _EXPECTED_DEFAULT_ENTRIES = [
     ("gpt-6-sol", 2.00, 10.00, 0.20, 2.50),
     ("gpt-6.1-sol", 2.00, 10.00, 0.10, 2.50),
     ("gpt-6.1-terra", 1.00, 5.00, 0.05, 1.25),
+    ("gpt-6.2-astra", 8.00, 40.00, 0.40, 10.00),
+    ("gpt-6.2-sol", 2.00, 10.00, 0.10, 2.50),
     ("jp.anthropic.claude-opus-4-6-v1", 5.50, 27.50, 0.55, 6.875),
     ("jp.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.30, 16.50, 0.33, 4.125),
     ("jp.anthropic.claude-sonnet-4-6", 3.30, 16.50, 0.33, 4.125),
@@ -225,6 +227,8 @@ _EXPECTED_DEFAULT_ENTRIES = [
     ("openai/gpt-6-sol", 2.00, 10.00, 0.20, 2.50),
     ("openai/gpt-6.1-sol", 2.00, 10.00, 0.10, 2.50),
     ("openai/gpt-6.1-terra", 1.00, 5.00, 0.05, 1.25),
+    ("openai/gpt-6.2-astra", 8.00, 40.00, 0.40, 10.00),
+    ("openai/gpt-6.2-sol", 2.00, 10.00, 0.10, 2.50),
     ("openai/o1", 15.00, 60.00, 7.50, 15.00),
     ("us.anthropic.claude-haiku-4-5-20251001-v1:0", 1.10, 5.50, 0.11, 1.375),
     ("us.anthropic.claude-opus-4-5-20251101-v1:0", 5.50, 27.50, 0.55, 6.875),
@@ -403,6 +407,8 @@ _OPENAI_IDS = [
     "gpt-6-sol",
     "gpt-6.1-sol",
     "gpt-6.1-terra",
+    "gpt-6.2-astra",
+    "gpt-6.2-sol",
     "o1",
 ]
 
