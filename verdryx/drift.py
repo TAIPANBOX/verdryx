@@ -7,6 +7,10 @@ mean_score) keeps the comparison correct even when runs have different case
 counts, avoiding a Simpson's-paradox-style distortion that a mean-of-means
 would introduce.
 
+Two things decide the verdict, and only two: the flat threshold and the
+bootstrap interval. Welch's t-statistic is computed and reported beside
+them and decides nothing.
+
 The verdict starts as a threshold call: `on-track` unless the pooled mean has
 dropped by at least `threshold` below the baseline, in which case
 `regressed`. That flat threshold never goes away -- it is always sufficient
@@ -16,8 +20,9 @@ significance testing.
 When the caller also supplies `baseline_run` (the baseline's original
 EvalRun, reloaded via `Store.load_run(baseline.eval_run_id)`), compute_drift
 additionally runs a genuine two-sample comparison between the baseline run's
-own per-case scores and the recent pooled scores: a Welch's t-statistic
-(informational) plus a bootstrap confidence interval on the delta. If that
+own per-case scores and the recent pooled scores: a bootstrap confidence
+interval on the delta, with a Welch's t-statistic reported beside it for
+information only (it never changes the verdict). If that
 interval's upper bound stays below zero, the drop is significant at the
 configured confidence level even when it is smaller than `threshold`, and
 the verdict is `regressed` on that basis too. This closes the gap a flat
@@ -154,6 +159,7 @@ def compute_drift(
 
     mean_score = sum(all_values) / len(all_values)
     delta = mean_score - baseline.mean_score
+    # First of the two things that decide the verdict: the flat threshold.
     verdict = "regressed" if delta <= -threshold else "on-track"
 
     baseline_values = [s.value for s in baseline_run.scores] if baseline_run is not None else []
@@ -167,6 +173,8 @@ def compute_drift(
         and len(all_values) >= _MIN_SAMPLE_FOR_SIGNIFICANCE
     ):
         baseline_n = len(baseline_values)
+        # Informational only: reported on the DriftReport and the event,
+        # never read by the verdict below.
         t_statistic = _welch_t_statistic(all_values, baseline_values)
         resolved_rng = rng if rng is not None else random.Random()
         ci_low, ci_high = _bootstrap_delta_ci(
@@ -176,6 +184,8 @@ def compute_drift(
             confidence=confidence,
             rng=resolved_rng,
         )
+        # Second and last thing that decides the verdict: the interval's
+        # upper bound below zero. Welch's t is not consulted.
         if ci_high < 0:
             verdict = "regressed"
 

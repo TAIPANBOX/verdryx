@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml/badge.svg)](https://github.com/TAIPANBOX/verdryx/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-3776AB.svg)
-![tests](https://img.shields.io/badge/tests-763-brightgreen.svg)
+![tests](https://img.shields.io/badge/tests-815-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/phase-1%20(mvp)-success.svg)
 
@@ -14,8 +14,8 @@
 
 </div>
 
-Line coverage of the `verdryx` package: **98%** (`2164/2211` statements).
-`@measured pytest --cov=verdryx --cov-report=term-missing 2026-11-04` (python 3.11 on forge, as CI).
+Line coverage of the `verdryx` package: **98%** (`2249/2295` statements).
+`@measured pytest --cov=verdryx --cov-report=term-missing 2026-11-23` (python 3.13 on forge; CI runs 3.11).
 Unlike the tests badge above, this figure is not gated (see CLAUDE.md invariant
 11): recomputing it inside a gate would mean running the full suite inside a
 gate, which is what the other gates already run once per CI job, so it is
@@ -215,6 +215,19 @@ Grading untrusted agent output is exactly the kind of place a prompt injection
 would try to hijack the grader, so the judge prompt is built defensively even
 though Verdryx itself never acts on what it reads.
 
+The judge's score is read from one declared line and from nothing else. The
+prompt asks for a reply that is exactly `SCORE: <number>`, the number in ASCII
+digits between 0 and 1 (for example `SCORE: 0.75`), and the parser accepts
+that line alone, with whitespace around it. Any other reply is refused with a
+reason: no score line, more than one, the score line beside other text
+(including a score quoted inside prose), a malformed number (NaN, an exponent,
+non-ASCII digits, a percentage) or a number outside [0, 1], which is refused
+rather than clamped. A refused case is counted apart in `EvalRun.unanswered`,
+the same place an unanswered typed case goes, and never becomes a score, so it
+cannot reach a run's mean, drift or the error budget. The parser it replaces
+took the first number anywhere in the reply, so "1 of 5 criteria met, 0.2"
+read as a perfect 1.0.
+
 **Drift** (`compute_drift(recent_runs, baseline, threshold=0.05)`) pools
 every case score across a window of the most recent eval runs into one mean
 (not a mean of each run's own mean, which would distort unevenly-sized
@@ -227,11 +240,13 @@ That flat threshold is always sufficient on its own to trip the verdict, and
 never goes away. When the caller also passes `baseline_run` (the baseline's
 original `EvalRun`, with its per-case scores), `compute_drift` additionally
 runs a two-sample significance check between those scores and the recent
-pooled ones: a Welch's t-statistic (informational) plus a bootstrap
-confidence interval on the delta. If that interval's upper bound stays below
-zero, the verdict is `"regressed"` too, even when the drop is smaller than
+pooled ones: a bootstrap confidence interval on the delta. If that
+interval's upper bound stays below zero, the verdict is `"regressed"` too, even when the drop is smaller than
 `threshold` -- catching a small but consistent regression a flat threshold
-sized to filter noise would otherwise miss.
+sized to filter noise would otherwise miss. The flat threshold and that
+interval are the only two things that decide the verdict. A Welch's
+t-statistic is computed and printed beside them for information, and never
+changes the verdict.
 
 `verdryx drift --baseline ID --window N` fetches the baseline, filters
 stored runs to the same model, takes the `N` most recent, and prints the
@@ -894,7 +909,7 @@ slipping?
 - [x] Tool-call accuracy (`tool_trace`): single-turn, no-execution grading of a model's own ordered `tool_use` names via `LLMAdapter.complete_with_tools`, exact-match/LCS-partial-credit scoring, drift/baselines work on its scores unchanged
 - [x] `StubLLMAdapter` (deterministic, offline, used by CI) and `AnthropicAdapter` (real Messages API, `base_url` proxy support, prompt-injection-resistant judge wrapping)
 - [x] Judge call pricing: `verdryx.pricing.PriceBook`, a dependency-free port of TokenFuse's default price book, populates `Score.cost_usd` for `llm_judge` cases
-- [x] Baselines and drift: `compute_drift`, flat-threshold `on-track`/`regressed` verdict plus a Welch's-t/bootstrap-CI significance check, `verdryx drift` CLI
+- [x] Baselines and drift: `compute_drift`, flat-threshold `on-track`/`regressed` verdict plus a bootstrap-CI significance check (Welch's t reported beside it, informational only), `verdryx drift` CLI
 - [x] Cost per outcome: `cost_per_outcome`, NDJSON/CSV/Parquet loaders, `verdryx cost-per-correct --input`/`--traces`
 - [x] Opt-in NDJSON event log: `eval_run`, `quality_score`, `quality_drift` events on the shared Agent Passport envelope; opt-in, fail-open, empty-`agent_id` events skipped and counted
 - [x] Configuration via `verdryx.config.Config`, CLI flags override environment

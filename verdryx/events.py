@@ -61,8 +61,8 @@ and severity for verdryx's ``eval_run`` row, no closed field list, and
 
 ``baseline_n``/``t_statistic``/``ci_low``/``ci_high`` come from
 :func:`verdryx.drift.compute_drift`'s optional two-sample significance
-check (Welch's t-statistic plus a bootstrap confidence interval on the
-delta). They are ``0``/``None``/``None``/``None`` when that check did not
+check: a bootstrap confidence interval on the delta, which can decide the
+verdict, and a Welch's t-statistic, which is informational only. They are ``0``/``None``/``None``/``None`` when that check did not
 run (fewer than 2 scores in either the baseline run or the recent window).
 
 ``prev_hash`` chain (SPEC.md Sec 6.5)

@@ -61,11 +61,11 @@ from verdryx.events import EventLog, resolve_events_path
 from verdryx.graders import (
     AnthropicAdapter,
     Grader,
+    GradeUnanswered,
     LLMAdapter,
     StubLLMAdapter,
     ToolTraceGrader,
     TypedGrader,
-    TypedUnanswered,
     TypryxClient,
     TypryxError,
     build_graders,
@@ -242,7 +242,10 @@ def run_eval(
     TypedUnanswered (graders.py); THIS function catches it, per case, and
     appends a models.Unanswered to the returned EvalRun's own `unanswered`
     list instead of letting it end the run -- see that exception's own
-    docstring for the decision and why it changed. TypryxError (a refusal,
+    docstring for the decision and why it changed. A GraderKind.LLM_JUDGE
+    case whose judge reply is refused (not the declared score line alone)
+    raises JudgeUnanswered, the same base class, and lands in the same list
+    with the parser's reason. TypryxError (a refusal,
     an unreachable typryx) is a different fact -- an infrastructure
     failure, not a verdict -- and is NOT caught here: it propagates out of
     this function, and verdryx.cli._cmd_eval is what turns it into a clean
@@ -297,12 +300,13 @@ def run_eval(
             output, completion_tokens, completion_cost_usd = adapter.complete(case.prompt)
         try:
             result = grader.grade(case, output)
-        except TypedUnanswered as e:
-            # Counted apart, not scored: see TypedUnanswered's own
-            # docstring and models.Unanswered. Only a TypedGrader can ever
-            # raise this, so this except is reachable for GraderKind.TYPED
-            # cases alone -- every other grader kind's grade() call passes
-            # straight through unchanged.
+        except GradeUnanswered as e:
+            # Counted apart, not scored: see GradeUnanswered's own docstring
+            # and models.Unanswered. Two graders raise it: a TypedGrader when
+            # typryx answers unanswered (TypedUnanswered), and an
+            # LLMJudgeGrader when the judge's reply is refused
+            # (JudgeUnanswered). Every other grader kind's grade() call
+            # passes straight through unchanged.
             unanswered.append(Unanswered(case_id=e.case_id, answer_id=e.answer_id, reason=e.reason))
             continue
         scores.append(
@@ -454,7 +458,10 @@ def _cmd_eval(args: argparse.Namespace, config: Config) -> None:
             reasons = ", ".join(f"{reason}: {count}" for reason, count in reason_counts.items())
             print(f"  unanswered: {len(run.unanswered)} of {run.cases_asked} asked ({reasons})")
             for u in run.unanswered:
-                print(f"    {u.case_id}  (answer_id={u.answer_id})")
+                # A refused judge reply has no answer id to trace; only a
+                # typryx answer does.
+                trace = f"  (answer_id={u.answer_id})" if u.answer_id else f"  ({u.reason})"
+                print(f"    {u.case_id}{trace}")
             print()
     finally:
         # A one-shot CLI process exits as soon as this handler returns, on
@@ -576,7 +583,7 @@ def _cmd_drift(args: argparse.Namespace, config: Config) -> None:
         )
     if report.baseline_n:
         t_display = f"{report.t_statistic:.2f}" if report.t_statistic is not None else "n/a"
-        print(f"  t-statistic: {t_display}  (n={report.baseline_n} baseline cases)")
+        print(f"  t-statistic: {t_display}  (informational; n={report.baseline_n} baseline cases)")
         print(
             f"  {DEFAULT_CONFIDENCE:.0%} CI on delta: [{report.ci_low:+.3f}, {report.ci_high:+.3f}]"
         )

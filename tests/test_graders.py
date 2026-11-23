@@ -16,9 +16,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from verdryx.graders import (
+    _JUDGE_SCORE_REQUEST,
     AnthropicAdapter,
     ExactGrader,
     Grader,
+    JudgeScoreRefused,
+    JudgeUnanswered,
     LLMAdapter,
     LLMJudgeGrader,
     OutcomeTagGrader,
@@ -386,18 +389,22 @@ def test_llm_judge_grader_requires_rubric() -> None:
         grader.grade(case, "output")
 
 
-def test_llm_judge_grader_clamps_high_adapter_value() -> None:
+def test_llm_judge_grader_refuses_high_adapter_value() -> None:
     adapter = StubLLMAdapter(judge_value=1.5)
     grader = LLMJudgeGrader(adapter)
     case = EvalCase(id="c1", prompt="p", rubric="x", grader=GraderKind.LLM_JUDGE)
-    assert grader.grade(case, "output").value == 1.0
+    with pytest.raises(JudgeUnanswered) as info:
+        grader.grade(case, "output")
+    assert info.value.reason == "judge_score_out_of_range"
 
 
-def test_llm_judge_grader_clamps_low_adapter_value() -> None:
+def test_llm_judge_grader_refuses_low_adapter_value() -> None:
     adapter = StubLLMAdapter(judge_value=-0.5)
     grader = LLMJudgeGrader(adapter)
     case = EvalCase(id="c1", prompt="p", rubric="x", grader=GraderKind.LLM_JUDGE)
-    assert grader.grade(case, "output").value == 0.0
+    with pytest.raises(JudgeUnanswered) as info:
+        grader.grade(case, "output")
+    assert info.value.reason == "judge_score_out_of_range"
 
 
 def test_llm_judge_grader_satisfies_grader_protocol() -> None:
@@ -500,7 +507,7 @@ def _run_all_three_calls(adapter: AnthropicAdapter) -> MagicMock:
     discriminates on block type."""
     mock_client = MagicMock()
     response = SimpleNamespace(
-        content=[SimpleNamespace(type="text", text="0.5")],
+        content=[SimpleNamespace(type="text", text="SCORE: 0.5")],
         usage=SimpleNamespace(input_tokens=1, output_tokens=1),
     )
     mock_client.messages.create.return_value = response
@@ -552,7 +559,7 @@ def test_anthropic_adapter_judge_parses_score_from_response() -> None:
     adapter = AnthropicAdapter()
     mock_client = MagicMock()
     response = SimpleNamespace(
-        content=[SimpleNamespace(text="0.8")],
+        content=[SimpleNamespace(text="SCORE: 0.8")],
         usage=SimpleNamespace(input_tokens=10, output_tokens=1),
     )
     mock_client.messages.create.return_value = response
@@ -562,32 +569,40 @@ def test_anthropic_adapter_judge_parses_score_from_response() -> None:
     assert tokens == 11
 
 
-def test_anthropic_adapter_judge_clamps_out_of_range_score() -> None:
+def test_anthropic_adapter_judge_refuses_out_of_range_score() -> None:
+    """A number outside [0, 1] on the score line is refused, not clamped:
+    a clamp turned 7 into a perfect 1.0."""
     adapter = AnthropicAdapter()
     mock_client = MagicMock()
     response = SimpleNamespace(
-        content=[SimpleNamespace(text="7")],
+        content=[SimpleNamespace(text="SCORE: 7")],
         usage=SimpleNamespace(input_tokens=1, output_tokens=1),
     )
     mock_client.messages.create.return_value = response
-    with patch.object(adapter, "_get_client", return_value=mock_client):
-        value, _tokens, _cost_usd = adapter.judge("prompt", "output", "rubric")
-    assert value == 1.0
+    with (
+        patch.object(adapter, "_get_client", return_value=mock_client),
+        pytest.raises(JudgeScoreRefused) as info,
+    ):
+        adapter.judge("prompt", "output", "rubric")
+    assert info.value.reason == "judge_score_out_of_range"
 
 
-def test_anthropic_adapter_judge_survives_empty_response() -> None:
-    """A structurally surprising (empty content) response degrades to 0.0,
-    not an exception, mirroring engram.llm._anthropic_text's hardening."""
+def test_anthropic_adapter_judge_refuses_empty_response() -> None:
+    """A structurally surprising (empty content) response is a refusal, not
+    a 0.0: an unmeasured case is never a zero (invariant 8)."""
     adapter = AnthropicAdapter()
     mock_client = MagicMock()
     response = SimpleNamespace(content=[], usage=SimpleNamespace(input_tokens=1, output_tokens=0))
     mock_client.messages.create.return_value = response
-    with patch.object(adapter, "_get_client", return_value=mock_client):
-        value, _tokens, _cost_usd = adapter.judge("prompt", "output", "rubric")
-    assert value == 0.0
+    with (
+        patch.object(adapter, "_get_client", return_value=mock_client),
+        pytest.raises(JudgeScoreRefused) as info,
+    ):
+        adapter.judge("prompt", "output", "rubric")
+    assert info.value.reason == "judge_reply_empty"
 
 
-def test_anthropic_adapter_judge_survives_non_numeric_response() -> None:
+def test_anthropic_adapter_judge_refuses_non_numeric_response() -> None:
     adapter = AnthropicAdapter()
     mock_client = MagicMock()
     response = SimpleNamespace(
@@ -595,9 +610,12 @@ def test_anthropic_adapter_judge_survives_non_numeric_response() -> None:
         usage=SimpleNamespace(input_tokens=1, output_tokens=1),
     )
     mock_client.messages.create.return_value = response
-    with patch.object(adapter, "_get_client", return_value=mock_client):
-        value, _tokens, _cost_usd = adapter.judge("prompt", "output", "rubric")
-    assert value == 0.0
+    with (
+        patch.object(adapter, "_get_client", return_value=mock_client),
+        pytest.raises(JudgeScoreRefused) as info,
+    ):
+        adapter.judge("prompt", "output", "rubric")
+    assert info.value.reason == "judge_no_score_line"
 
 
 # ------------------------------------------------------------------
@@ -734,7 +752,7 @@ def test_anthropic_adapter_judge_prices_known_model_via_default_price_book() -> 
     adapter = AnthropicAdapter()
     mock_client = MagicMock()
     response = SimpleNamespace(
-        content=[SimpleNamespace(text="0.8")],
+        content=[SimpleNamespace(text="SCORE: 0.8")],
         usage=SimpleNamespace(input_tokens=10, output_tokens=1),
     )
     mock_client.messages.create.return_value = response
@@ -748,7 +766,7 @@ def test_anthropic_adapter_judge_prices_unknown_model_via_conservative_fallback(
     adapter = AnthropicAdapter(model="some-future-model-nobody-has-priced-yet")
     mock_client = MagicMock()
     response = SimpleNamespace(
-        content=[SimpleNamespace(text="0.5")],
+        content=[SimpleNamespace(text="SCORE: 0.5")],
         usage=SimpleNamespace(input_tokens=1_000_000, output_tokens=1_000_000),
     )
     mock_client.messages.create.return_value = response
@@ -763,7 +781,7 @@ def test_anthropic_adapter_judge_uses_injected_price_book() -> None:
     adapter = AnthropicAdapter(model="weird-model", price_book=custom_book)
     mock_client = MagicMock()
     response = SimpleNamespace(
-        content=[SimpleNamespace(text="1")],
+        content=[SimpleNamespace(text="SCORE: 1")],
         usage=SimpleNamespace(input_tokens=1_000_000, output_tokens=0),
     )
     mock_client.messages.create.return_value = response
@@ -1308,7 +1326,7 @@ def test_judge_message_output_cannot_close_its_own_block() -> None:
     assert message.count(closing) == 1
     block_body = message.split(f"<output-{fence}>", 1)[1].split(closing, 1)[0]
     assert block_body == _FORGED_CLOSE
-    assert message.endswith(f"{closing}\nScore:")
+    assert message.endswith(f"{closing}\n{_JUDGE_SCORE_REQUEST}")
 
 
 def test_judge_message_fence_is_fresh_on_every_call() -> None:

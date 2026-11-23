@@ -283,11 +283,16 @@ class Score:
 
 @dataclass
 class Unanswered:
-    """One eval case typryx could not answer.
+    """One eval case a grader could not answer: typryx answered it
+    unanswered, or the LLM judge's reply was refused.
 
     `graders.TypedGrader.grade` raises `graders.TypedUnanswered` (carrying
     exactly these three fields) when typryx's response has `unanswered:
-    true`; `cli.run_eval` catches that per case and appends one of these to
+    true`, and `graders.LLMJudgeGrader.grade` raises
+    `graders.JudgeUnanswered` when the judge's reply is not the declared
+    score line alone (its `answer_id` is empty, and `reason` is the
+    parser's word, e.g. "judge_no_score_line"). Both are
+    `graders.GradeUnanswered`; `cli.run_eval` catches that per case and appends one of these to
     `EvalRun.unanswered` instead of letting it end the whole run. It never
     becomes a `Score`: verdryx invariant 8 (CLAUDE.md) says an unmeasured
     indicator is never a zero, and a fabricated `Score(value=0.0)` here
@@ -356,7 +361,8 @@ class EvalRun:
     #: the version that changed (`findings.find_suspect`) and lets a registered
     #: fix be tested only by runs of the build that carries it.
     agent_version: str | None = None
-    #: Typed cases typryx could not answer, counted apart from `scores`
+    #: Cases a grader could not answer (typryx unanswered, a refused judge
+    #: reply), counted apart from `scores`
     #: rather than scored 0.0 or failing the run -- see `Unanswered`.
     #: Default empty: every non-typed run, and every typed run that ran
     #: before this field existed (an older store's row hydrates this as

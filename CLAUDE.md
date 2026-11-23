@@ -38,7 +38,9 @@ agents. Never describe it as tooling for acting against anyone else.
    co-author trailer naming the model that actually did the work.
 4. Push the branch, open a PR with `gh`.
 5. Wait for all CI checks to go green. Fix forward, do not force-push over red.
-6. **Ask the user before merging.** Do not self-merge.
+6. The session that opened the PR merges it itself once every required check
+   is green on the current head. Releases, tags and PyPI publishing still
+   need the owner's explicit yes (see "Escalate, do not push through").
 
 ## Gates
 
@@ -54,6 +56,8 @@ pytest
 ./scripts/lock-satisfies-pyproject.sh
 ./scripts/human-grades-have-one-door.sh
 ./scripts/no-reader-leaves-a-pipe-early.sh  # invariant 16
+./scripts/canonical-json-is-delegated.sh    # invariant 3
+./scripts/traces-are-read-not-written.sh    # invariant 4
 ./scripts/gates-have-teeth.sh   # invariant 7; needs a clean tree and the package installed
 pip-audit --skip-editable       # CI only; no ignored advisories, needs pip-audit installed
 ```
@@ -91,11 +95,21 @@ an absent invariant.
    Two implementations of a canonical form always disagree eventually, and this
    one has to agree byte for byte with the Go side of the stack, which uses
    `gowebpki/jcs`. If canonical bytes differ, every `prev_hash` chain crossing
-   the language boundary breaks. *(not enforced)*
+   the language boundary breaks. *(gate: `scripts/canonical-json-is-delegated.sh`,
+   which reads the package's AST: `canonicalize` returns `rfc8785.dumps`,
+   `chain_hash` hashes `canonicalize(...)`, and nothing in `verdryx/` hashes
+   `json.dumps` output or calls it with both `sort_keys=True` and
+   `separators=`; it refuses to report OK when either function is gone. Not
+   held: a canonical form hand-rolled some other way, a custom encoder or
+   string building, which no text check can tell from ordinary code.)*
 4. **Verdryx reads traces, it does not produce them.** The outcome-tagged
    Parquet traces are TokenFuse's output and its schema. If a field is missing,
    the fix is in TokenFuse, not a locally invented column here.
-   *(not enforced)*
+   *(partly gated: `scripts/traces-are-read-not-written.sh` refuses any
+   Parquet or Arrow write in `verdryx/` and requires `costper.py`'s reader to
+   still be there. Not held: reading a column under a name TokenFuse never
+   wrote, which is judgement, since no text check can tell a new field from a
+   renamed one.)*
 5. **A grader that costs money never runs by default.** The LLM judge is priced
    per call, and so is typryx's own backend, an optional separate service
    `TypedGrader` asks. Any code path that could reach a paid provider must be
@@ -130,12 +144,13 @@ an absent invariant.
    A text parser does not break loudly: it stops matching and reports success.
    The mutants that proved these gates lived in commit messages and in the
    `*(gate: ...)*` markers above, which is a record of what was true once.
-   *(gate: `scripts/gates-have-teeth.sh`, 27 cases: nineteen real faults each
-   gate must catch, three non-faults they must not, and five subjects taken away
-   entirely. It read "10 cases" until 2026-08-26, "14 cases" until the lock
+   *(gate: `scripts/gates-have-teeth.sh`, 58 cases, counted with
+   `grep -c '^run_case ' scripts/gates-have-teeth.sh` on 2026-11-23. It read
+   "10 cases" until 2026-08-26, "14 cases" until the lock
    gate's own teeth arrived, "19 cases" until the typryx grader's own two
-   arrived (2026-09-25) and "21 cases" until the human-grade gate's six, having
-   been written once while the cases kept
+   arrived (2026-09-25), "21 cases" until the human-grade gate's six, and
+   "27 cases" while the pipe gate's eighteen and the canonical-JSON, trace
+   and judge-score cases arrived, having been written once while the cases kept
    arriving each time, which is invariant 6's own failure inside
    the file that records invariant 6. Counted by running it. The non-fault cases are the ones worth keeping: an optional
    dependency imported INSIDE a function is exactly what invariant 2 allows,
@@ -227,7 +242,11 @@ an absent invariant.
 
    Adding enforcement is a decision for the user, not a convenience, and it
    belongs in the same list as adding a runtime dependency.
-   *(not enforced; held by this file and by there being no policy-writing code
+   *(not enforced: enforcement would arrive as ordinary new code, an HTTP call
+   or a file write, with no fixed text shape a check could look for, and the
+   package already makes legitimate outbound calls (the OTLP exporter, the
+   typryx client, the judge), so a check for "no call out" would fire on
+   correct code; held by this file and by there being no policy-writing code
    to find)*
 
 10. **The install path CI and an operator use resolves to exact versions, not
@@ -330,7 +349,7 @@ an absent invariant.
 16. **A check says what the text holds, not which of a writer and its reader finished first.** `@claude 2026-11-06`, carried from stack-k8s#226 and stack-single#167; it records no decision of the owner. Under `set -o pipefail` a pipe into `grep -q` reports the writer too: grep leaves at its first match, a writer with more to write takes SIGPIPE, the pipeline returns 141, and a line that is there reads as missing. In the negative form, `if ... | grep -q bad`, the 141 reads as clean and a refused line passes. The rate follows the load on the machine. Here the places were `scripts/readme-numbers.sh` reading a test run's output, `examples/bakeoff/bakeoff.sh` and the teeth harness; this repository had not been seen to go red, and the rule is held before it does. Every such pipe in live shell code here moved, 3 in 3 files: to a here-string, `grep -q x <<<"$text"`, or to a pipe into `grep -c x >/dev/null`.
     *(gate: `scripts/no-reader-leaves-a-pipe-early.sh`: a control that breaks a real pipe, known lines through the reader, then every tracked shell file and workflow `run:` step masked down to live code. It refuses to report OK on no shell file, no pipe, no step or a file it lost its place in. Eighteen cases in `scripts/gates-have-teeth.sh`. Not held: `| head`, the same race, which here takes a few lines from a writer of a few lines.)*
 
-16. **`verdryx slo` measures its window, and a hold it causes need not spend
+17. **`verdryx slo` measures its window, and a hold it causes need not spend
     its budget.** `@decided 2026-11-07` (paraphrased): an agent whose error budget
     is spent is held for a person, in both stacks. `@claude` 2026-11-07, what that
     needed here, found by running the command on a real trace on forge: `--window`
@@ -348,11 +367,36 @@ an absent invariant.
     `test_a_hold_spends_no_budget_when_told_so`,
     `test_a_run_a_deny_stopped_still_spends_the_budget_when_holds_do_not`.)*
 
+18. **The LLM judge's score is read from one declared line, or the case is
+    refused.** `@decided 2026-11-23`: the judge prompt declares one exact score
+    format, the parser accepts only that format, and every ambiguous reply is a
+    refusal, never a pass and never a number. The format is
+    `graders.JUDGE_SCORE_FORMAT`, a reply that is the single line
+    `SCORE: <number>` with an ASCII decimal in [0, 1], quoted into the prompt
+    from the same constant so the two cannot drift. No score line, more than
+    one, other text beside it, a malformed number or one out of range raises
+    `JudgeScoreRefused` with its reason; `LLMJudgeGrader` turns that, and an
+    adapter value that is not a finite number in [0, 1], into
+    `JudgeUnanswered`, which `run_eval` counts in `EvalRun.unanswered` through
+    the same `GradeUnanswered` base an unanswered typed case uses. Nothing is
+    clamped. The parser it replaced took the first number anywhere in the
+    reply, so "1 of 5 criteria met, 0.2" read as 1.0 and reached drift and
+    `slo_burn`. Not held: the judge call's own tokens and cost for a refused
+    case are not added to the run's total, the same gap an unanswered typed
+    case already has, because `Unanswered` carries no cost.
+    *(test: every scenario of `features/judge-score-format.feature` bound,
+    among them `tests/test_judge_score.py::test_a_reply_that_leads_with_a_count_is_refused_not_read_as_its_first_number`,
+    `test_a_refused_judge_reply_is_counted_apart_and_never_scored`, a hostile
+    list and a 400-seed sweep; all run red against the first-number parser
+    first. Behavioural, so no gate script; the teeth harness puts the old
+    parser, the clamp and the uncaught refusal back and requires the named
+    test to go red.)*
+
 ## Decisions that have no gate yet
 
 This list is debt, and it is here to stay visible rather than to be tidy.
 
-**Held by this file alone: invariants 3 and 4.**
+**Held by this file alone: invariant 9, and the column half of invariant 4.**
 
 Invariant 1 used to be in that list, and this section asked for a script
 asserting that `[project].dependencies` contains exactly `rfc8785`. That script
@@ -395,10 +439,17 @@ Verified by breaking five ways: a paid default on `--model`, a second
 unconditionally, `build_graders()` registering the typed grader
 unconditionally, and a second `TypryxClient` construction site.
 
-Invariants 3 and 4 are judgement and probably stay judgement.
+Invariants 3 and 4 were in this list until 2026-11-23, and this line said
+they "are judgement and probably stay judgement". Half of that was wrong:
+delegating the canonical form and never writing a trace both have a text
+shape, and `scripts/canonical-json-is-delegated.sh` and
+`scripts/traces-are-read-not-written.sh` now hold them, each with its teeth
+in the harness. What stays judgement is what has no text shape: invariant 9
+(enforcement would be ordinary new code) and invariant 4's "no locally
+invented column" (a read under a wrong name looks like any other read).
 
 Invariant 11's README coverage figure is held by this file alone, same as
-invariants 3 and 4: nothing cross-checks it against a fresh run the way
+invariant 9: nothing cross-checks it against a fresh run the way
 `scripts/readme-numbers.sh` does for the test count. Wiring that up would mean
 a gate that reruns the full suite under coverage every time it is asked
 whether a number is stale, which is a real cost for a number with no pass/fail
