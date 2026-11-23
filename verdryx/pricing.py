@@ -190,7 +190,7 @@ class PriceBook:
         and no caller reports a 1-hour subset, so it has nothing to price.
         estate-gates' C3 compares the four rates carried here.
         """
-        return (
+        book = (
             cls()
             # Illustrative generic entries (kept for callers that pass a
             # bare family name rather than a real dated provider model id,
@@ -487,6 +487,11 @@ class PriceBook:
             .with_price("kimi-k3", ModelPrice(3.00, 15.00, 0.30, 3.00))
             .with_price("glm-5.3", ModelPrice(1.40, 4.40, 0.26, 1.40))
             .with_price("glm-5.1", ModelPrice(1.40, 4.40, 0.26, 1.40))
+        )
+        # Split in two expressions: one chain of every row trips the recursion
+        # limit in ast-walking tools (the no-paid-by-default gate) at this length.
+        return (
+            book
             #
             # Rows from tokenfuse's contracts/tokenfuse-constants.json on
             # branch claude/p3-pricebook, mirrored 2026-11-23: Claude ids on
