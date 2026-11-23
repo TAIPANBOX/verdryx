@@ -76,6 +76,15 @@ jobs:
       - name: no pipe ends in a grep that leaves early
         run: ./scripts/no-reader-leaves-a-pipe-early.sh
 
+      # The chain hash has to agree byte for byte with the Go side, so the
+      # canonical form stays delegated to rfc8785 (invariant 3).
+      - name: canonical JSON is delegated, never hand-rolled
+        run: ./scripts/canonical-json-is-delegated.sh
+
+      # TokenFuse produces the traces; this plane only reads them (invariant 4).
+      - name: traces are read, never written
+        run: ./scripts/traces-are-read-not-written.sh
+
       # Last, because it mutates tracked files and restores them. It needs a
       # clean tree and says so plainly, so it also reports any earlier step
       # that starts writing into the checkout.

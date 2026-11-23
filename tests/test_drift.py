@@ -202,3 +202,35 @@ def test_compute_drift_ci_bounds_widen_with_higher_confidence() -> None:
     )
     assert wide.ci_low <= narrow.ci_low
     assert wide.ci_high >= narrow.ci_high
+
+
+@pytest.mark.parametrize(
+    ("forced_t", "recent_values", "expected"),
+    [
+        # Delta 0, interval at 0: on-track, however extreme a t is reported.
+        (-1000.0, [0.9] * 8, "on-track"),
+        (float("-inf"), [0.9] * 8, "on-track"),
+        # Delta -0.03 under the threshold, interval wholly below zero:
+        # regressed, even with a t that points the other way.
+        (1000.0, [0.87] * 8, "regressed"),
+    ],
+)
+def test_the_t_statistic_never_decides_the_verdict(
+    monkeypatch: pytest.MonkeyPatch, forced_t: float, recent_values: list[float], expected: str
+) -> None:
+    # The verdict comes from the flat threshold or the bootstrap interval;
+    # Welch's t is reported beside them and decides nothing. Forcing t to an
+    # extreme in either direction must not move the verdict.
+    import verdryx.drift as drift
+
+    monkeypatch.setattr(drift, "_welch_t_statistic", lambda _a, _b: forced_t)
+    baseline_run = _run("r0", [0.9] * 8)
+    report = drift.compute_drift(
+        [_run("r1", recent_values)],
+        _baseline(0.9),
+        threshold=0.05,
+        baseline_run=baseline_run,
+        rng=random.Random(7),
+    )
+    assert report.t_statistic == forced_t
+    assert report.verdict == expected

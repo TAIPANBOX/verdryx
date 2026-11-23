@@ -60,13 +60,14 @@ CLAUDE_RUBRIC = (
 DEFAULT_CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
 #: A rough estimate, not a bill: the judge system prompt (graders.py's
-#: _JUDGE_SYSTEM_PROMPT, ~80 tokens) plus CLAUDE_RUBRIC (~45 tokens) plus a
+#: _JUDGE_SYSTEM_PROMPT, ~150 tokens since it declares the SCORE line format,
+#: 2026-11-23) plus CLAUDE_RUBRIC (~45 tokens) plus a
 #: short task/final_answer pair from this harness's own dataset (arithmetic,
 #: routing, and format tasks here all run well under 100 tokens). Padded up
 #: for safety since an estimate that runs low defeats the point of asking
 #: before spending. graders.py's judge() sets max_tokens=16 on the call, so
 #: the output-token estimate is exact, not approximate.
-ESTIMATED_INPUT_TOKENS_PER_CASE = 220
+ESTIMATED_INPUT_TOKENS_PER_CASE = 300
 ESTIMATED_OUTPUT_TOKENS_PER_CASE = 16
 
 DEFAULT_TYPED_TEMPLATE = "eval.outcome_met"

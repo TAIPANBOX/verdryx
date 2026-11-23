@@ -43,7 +43,7 @@
           <text x="842" y="46" fill="#E9EFF6" font-size="12.5" font-weight="700">reports</text>
           <text x="842" y="66" fill="#8A97A6" font-size="10.5">CostPerOutcomeReport</text>
           <text x="842" y="82" fill="#8A97A6" font-size="10.5">DriftReport + baseline</text>
-          <text x="842" y="102" fill="#5A6675" font-size="10.5">Welch&#8217;s-t &#183; bootstrap CI</text>
+          <text x="842" y="102" fill="#5A6675" font-size="10.5">bootstrap CI &#183; t informational</text>
 
           <rect x="742" y="140" width="200" height="54" rx="14" fill="#10161F" stroke="#2a3547"/>
           <text x="842" y="163" fill="#E9EFF6" font-size="12.5" font-weight="700">store</text>

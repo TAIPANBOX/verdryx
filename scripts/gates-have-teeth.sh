@@ -452,6 +452,86 @@ run_case "no-reader-leaves-a-pipe-early: no workflow step is read" fail \
 	"$(py 'edit("scripts/no-reader-leaves-a-pipe-early.sh", "elif path.startswith(\".github/workflows/\") and", "elif path.startswith(\".github/flows/\") and")')" \
 	'measured NOTHING'
 
+# Invariant 3. The chain hash is sha256 over RFC 8785 bytes, and the Go side
+# computes the same bytes with gowebpki/jcs. The faults are the two ways a
+# hand-rolled canonical form gets in (inside canonicalize, or by hashing
+# json.dumps output directly) and the shape of one anywhere else; the non-fault
+# is sort_keys alone, which store.py already uses for storage nobody hashes.
+
+run_case "canonical-json-is-delegated: canonicalize hand-rolls the canonical form" fail \
+	'./scripts/canonical-json-is-delegated.sh' \
+	"$(py 'edit("verdryx/events.py", "    return rfc8785.dumps(copy)", "    return json.dumps(copy, sort_keys=True, separators=(\",\", \":\")).encode()")')" \
+	"does not return rfc8785.dumps"
+
+run_case "canonical-json-is-delegated: the chain hash skips canonicalize" fail \
+	'./scripts/canonical-json-is-delegated.sh' \
+	"$(py 'edit("verdryx/events.py", "    digest = hashlib.sha256(canonicalize(envelope)).hexdigest()", "    digest = hashlib.sha256(json.dumps(envelope).encode()).hexdigest()")')" \
+	"hashes something other than"
+
+run_case "canonical-json-is-delegated: a canonical-looking dumps elsewhere" fail \
+	'./scripts/canonical-json-is-delegated.sh' \
+	"$(py 'edit("verdryx/store.py", "json.dumps(f.detail, sort_keys=True),", "json.dumps(f.detail, sort_keys=True, separators=(\",\", \":\")),")')" \
+	"hand-rolled canonical form"
+
+run_case "canonical-json-is-delegated: sort_keys alone, for storage" pass \
+	'./scripts/canonical-json-is-delegated.sh' \
+	"$(py 'edit("verdryx/models.py", "json.dumps(self.to_dict(), indent=2)", "json.dumps(self.to_dict(), indent=2, sort_keys=True)")')"
+
+run_case "canonical-json-is-delegated: canonicalize taken away entirely" fail \
+	'./scripts/canonical-json-is-delegated.sh' \
+	"$(py 'edit("verdryx/events.py", "def canonicalize(", "def canonical_form(")')" \
+	"measured nothing"
+
+# Invariant 4, the half text can hold: no Parquet or Arrow write in verdryx/.
+# A comment naming a writer is not a write, and the reader taken away leaves
+# nothing to hold to reading.
+
+run_case "traces-are-read-not-written: verdryx writes a Parquet file" fail \
+	'./scripts/traces-are-read-not-written.sh' \
+	"$(py 'edit("verdryx/costper.py", "        table = pq.read_table(file_path)\n", "        table = pq.read_table(file_path)\n        pq.write_table(table, file_path)\n")')" \
+	"writes trace data"
+
+run_case "traces-are-read-not-written: a comment names a writer" pass \
+	'./scripts/traces-are-read-not-written.sh' \
+	"$(py 'edit("verdryx/costper.py", "_PARQUET_SUFFIXES = {", "# pq.write_table(table, path) is the producer\x27s job, not ours.\n_PARQUET_SUFFIXES = {")')"
+
+run_case "traces-are-read-not-written: the reader taken away entirely" fail \
+	'./scripts/traces-are-read-not-written.sh' \
+	"$(py 'edit("verdryx/costper.py", "table = pq.read_table(file_path)", "table = pq.read_pandas(file_path)")')" \
+	"measured nothing"
+
+# The LLM judge's score is read from one declared line (features/
+# judge-score-format.feature). The gate is the suite's own tests, so each case
+# puts one piece of the old behaviour back and requires the named test to go
+# red: the first number in the reply taken as the score, an out-of-range
+# adapter value clamped, a refusal no longer counted apart, and Welch's t
+# allowed to decide a drift verdict. The non-fault rewords a refusal message,
+# which no test pins beyond its reason.
+
+run_case "judge-score: the first number in the reply is the score again" fail \
+	'python3 -m pytest -q -p no:cacheprovider tests/test_judge_score.py' \
+	"$(py 'edit("verdryx/graders.py", "    stripped = text.strip()\n    if not stripped:\n        raise JudgeScoreRefused(", "    _first = re.search(r\"-?[0-9]+(?:[.][0-9]+)?\", text)\n    if _first:\n        return min(max(float(_first.group()), 0.0), 1.0)\n    stripped = text.strip()\n    if not stripped:\n        raise JudgeScoreRefused(")')" \
+	"test_a_reply_that_leads_with_a_count_is_refused_not_read_as_its_first_number"
+
+run_case "judge-score: an adapter value outside zero to one is clamped again" fail \
+	'python3 -m pytest -q -p no:cacheprovider tests/test_judge_score.py' \
+	"$(py 'edit("verdryx/graders.py", "        if not 0.0 <= value <= 1.0:\n            raise JudgeUnanswered(case.id, \"judge_score_out_of_range\")\n", "        value = min(max(value, 0.0), 1.0)\n")')" \
+	"test_an_adapter_value_outside_zero_one_is_refused"
+
+run_case "judge-score: a refused reply is no longer counted apart" fail \
+	'python3 -m pytest -q -p no:cacheprovider tests/test_judge_score.py' \
+	"$(py 'edit("verdryx/cli.py", "        except GradeUnanswered as e:", "        except TypryxError as e:")')" \
+	"test_a_refused_judge_reply_is_counted_apart_and_never_scored"
+
+run_case "judge-score: a refusal message reworded" pass \
+	'python3 -m pytest -q -p no:cacheprovider tests/test_judge_score.py' \
+	"$(py 'edit("verdryx/graders.py", "\"the judge replied with nothing\"", "\"the reply held only whitespace\"")')"
+
+run_case "drift: Welch's t decides a verdict" fail \
+	'python3 -m pytest -q -p no:cacheprovider tests/test_drift.py' \
+	"$(py 'edit("verdryx/drift.py", "        if ci_high < 0:\n", "        if ci_high < 0 or (t_statistic is not None and t_statistic < -2):\n")')" \
+	"test_the_t_statistic_never_decides_the_verdict"
+
 echo
 if [ -n "$(git status --porcelain)" ]; then
 	printf 'FAIL: this script left the tree dirty, so it cannot be trusted about anything above\n'
