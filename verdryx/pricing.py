@@ -190,7 +190,7 @@ class PriceBook:
         and no caller reports a 1-hour subset, so it has nothing to price.
         estate-gates' C3 compares the four rates carried here.
         """
-        return (
+        book = (
             cls()
             # Illustrative generic entries (kept for callers that pass a
             # bare family name rather than a real dated provider model id,
@@ -487,6 +487,81 @@ class PriceBook:
             .with_price("kimi-k3", ModelPrice(3.00, 15.00, 0.30, 3.00))
             .with_price("glm-5.3", ModelPrice(1.40, 4.40, 0.26, 1.40))
             .with_price("glm-5.1", ModelPrice(1.40, 4.40, 0.26, 1.40))
+        )
+        # Split in two expressions: one chain of every row trips the recursion
+        # limit in ast-walking tools (the no-paid-by-default gate) at this length.
+        return (
+            book
+            #
+            # Rows from tokenfuse's contracts/tokenfuse-constants.json on
+            # branch claude/p3-pricebook, mirrored 2026-11-23: Claude ids on
+            # Bedrock (global, us, eu, jp, au) and OpenRouter, and the Gemini 4
+            # API ids. Long-prompt tiers for the Bedrock Haiku 5.5 profiles.
+            .with_price("anthropic/claude-fable-5", ModelPrice(10.00, 50.00, 1.00, 12.50))
+            .with_price("anthropic/claude-fable-5.1", ModelPrice(10.00, 50.00, 0.25, 12.50))
+            .with_price("anthropic/claude-fable-5.2", ModelPrice(8.00, 40.00, 0.20, 10.00))
+            .with_price("anthropic/claude-opus-4.5", ModelPrice(5.00, 25.00, 0.50, 6.25))
+            .with_price("anthropic/claude-opus-4.6", ModelPrice(5.00, 25.00, 0.50, 6.25))
+            .with_price("anthropic/claude-opus-4.7", ModelPrice(5.00, 25.00, 0.50, 6.25))
+            .with_price("au.anthropic.claude-fable-5", ModelPrice(11.00, 55.00, 1.10, 13.75))
+            .with_price("au.anthropic.claude-fable-5-1", ModelPrice(11.00, 55.00, 0.275, 13.75))
+            .with_price("au.anthropic.claude-fable-5-2", ModelPrice(8.80, 44.00, 0.22, 11.00))
+            .with_price("au.anthropic.claude-haiku-5-5", ModelPrice(0.11, 0.55, 0.011, 0.1375))
+            .with_price("au.anthropic.claude-opus-5", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            .with_price("au.anthropic.claude-opus-5-5", ModelPrice(4.40, 22.00, 0.22, 5.50))
+            .with_price("au.anthropic.claude-sonnet-5", ModelPrice(2.20, 11.00, 0.22, 2.75))
+            .with_price("au.anthropic.claude-sonnet-5-5", ModelPrice(2.20, 11.00, 0.11, 2.75))
+            .with_price("eu.anthropic.claude-fable-5", ModelPrice(11.00, 55.00, 1.10, 13.75))
+            .with_price("eu.anthropic.claude-fable-5-1", ModelPrice(11.00, 55.00, 0.275, 13.75))
+            .with_price("eu.anthropic.claude-fable-5-2", ModelPrice(8.80, 44.00, 0.22, 11.00))
+            .with_price("eu.anthropic.claude-haiku-5-5", ModelPrice(0.11, 0.55, 0.011, 0.1375))
+            .with_price("eu.anthropic.claude-opus-5", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            .with_price("eu.anthropic.claude-opus-5-5", ModelPrice(4.40, 22.00, 0.22, 5.50))
+            .with_price("eu.anthropic.claude-sonnet-5", ModelPrice(2.20, 11.00, 0.22, 2.75))
+            .with_price("eu.anthropic.claude-sonnet-5-5", ModelPrice(2.20, 11.00, 0.11, 2.75))
+            .with_price("gemini-4-argon", ModelPrice(2.00, 10.00, 0.10, 2.00))
+            .with_price("gemini-4-carbon", ModelPrice(2.00, 10.00, 0.10, 2.00))
+            .with_price("gemini-4-hydrogen", ModelPrice(1.50, 7.50, 0.075, 1.50))
+            .with_price("gemini-4-neon", ModelPrice(3.00, 15.00, 0.15, 3.00))
+            .with_price("global.anthropic.claude-fable-5", ModelPrice(10.00, 50.00, 1.00, 12.50))
+            .with_price("global.anthropic.claude-fable-5-1", ModelPrice(10.00, 50.00, 0.25, 12.50))
+            .with_price("global.anthropic.claude-fable-5-2", ModelPrice(8.00, 40.00, 0.20, 10.00))
+            .with_price("global.anthropic.claude-haiku-5-5", ModelPrice(0.10, 0.50, 0.01, 0.125))
+            .with_price("global.anthropic.claude-opus-5", ModelPrice(5.00, 25.00, 0.50, 6.25))
+            .with_price("global.anthropic.claude-opus-5-5", ModelPrice(4.00, 20.00, 0.20, 5.00))
+            .with_price("global.anthropic.claude-sonnet-5", ModelPrice(2.00, 10.00, 0.20, 2.50))
+            .with_price("global.anthropic.claude-sonnet-5-5", ModelPrice(2.00, 10.00, 0.10, 2.50))
+            .with_price("jp.anthropic.claude-fable-5", ModelPrice(11.00, 55.00, 1.10, 13.75))
+            .with_price("jp.anthropic.claude-fable-5-1", ModelPrice(11.00, 55.00, 0.275, 13.75))
+            .with_price("jp.anthropic.claude-fable-5-2", ModelPrice(8.80, 44.00, 0.22, 11.00))
+            .with_price("jp.anthropic.claude-haiku-5-5", ModelPrice(0.11, 0.55, 0.011, 0.1375))
+            .with_price("jp.anthropic.claude-opus-5", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            .with_price("jp.anthropic.claude-opus-5-5", ModelPrice(4.40, 22.00, 0.22, 5.50))
+            .with_price("jp.anthropic.claude-sonnet-5", ModelPrice(2.20, 11.00, 0.22, 2.75))
+            .with_price("jp.anthropic.claude-sonnet-5-5", ModelPrice(2.20, 11.00, 0.11, 2.75))
+            .with_price("us.anthropic.claude-fable-5", ModelPrice(11.00, 55.00, 1.10, 13.75))
+            .with_price("us.anthropic.claude-fable-5-1", ModelPrice(11.00, 55.00, 0.275, 13.75))
+            .with_price("us.anthropic.claude-fable-5-2", ModelPrice(8.80, 44.00, 0.22, 11.00))
+            .with_price("us.anthropic.claude-haiku-5-5", ModelPrice(0.11, 0.55, 0.011, 0.1375))
+            .with_price("us.anthropic.claude-opus-5", ModelPrice(5.50, 27.50, 0.55, 6.875))
+            .with_price("us.anthropic.claude-opus-5-5", ModelPrice(4.40, 22.00, 0.22, 5.50))
+            .with_price("us.anthropic.claude-sonnet-5", ModelPrice(2.20, 11.00, 0.22, 2.75))
+            .with_price("us.anthropic.claude-sonnet-5-5", ModelPrice(2.20, 11.00, 0.11, 2.75))
+            .with_long_context(
+                "au.anthropic.claude-haiku-5-5", 100_000, ModelPrice(0.55, 2.75, 0.055, 0.6875)
+            )
+            .with_long_context(
+                "eu.anthropic.claude-haiku-5-5", 100_000, ModelPrice(0.55, 2.75, 0.055, 0.6875)
+            )
+            .with_long_context(
+                "global.anthropic.claude-haiku-5-5", 100_000, ModelPrice(0.50, 2.50, 0.05, 0.625)
+            )
+            .with_long_context(
+                "jp.anthropic.claude-haiku-5-5", 100_000, ModelPrice(0.55, 2.75, 0.055, 0.6875)
+            )
+            .with_long_context(
+                "us.anthropic.claude-haiku-5-5", 100_000, ModelPrice(0.55, 2.75, 0.055, 0.6875)
+            )
             #
             # Conservative fallback for anything not listed above (mirrors
             # tokenfuse's ADR-8): priced at 3x Opus 4.5, the most expensive
