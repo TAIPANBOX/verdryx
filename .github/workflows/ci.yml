@@ -51,7 +51,19 @@ jobs:
           pip install -e . --no-deps
 
       - name: Run Pytest with coverage
-        run: pytest --cov=verdryx --cov-report=term-missing
+        run: |
+          floor="$(grep -v '^[[:space:]]*#' .coverage-floor | tr -d '[:space:]')"
+          pytest --cov=verdryx --cov-report=term-missing --cov-report=json:"$RUNNER_TEMP/coverage.json" --cov-fail-under="$floor"
+      # The same total, read back from the report, with the slack and the gap
+      # to the target in the job summary; and the floor only rises.
+      - name: coverage is not below the floor
+        run: ./scripts/coverage-floor.sh check "$RUNNER_TEMP/coverage.json"
+      - name: the coverage floor only rises
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+          git show FETCH_HEAD:.coverage-floor > "$RUNNER_TEMP/base-floor" 2>/dev/null || rm -f "$RUNNER_TEMP/base-floor"
+          ./scripts/coverage-floor.sh ratchet "$RUNNER_TEMP/base-floor"
 
       # A number in a README is a claim with no owner: right the day it is
       # written, and the suite grows in commits that never open the file. On
