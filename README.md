@@ -14,8 +14,9 @@
 
 </div>
 
-Line coverage of the `verdryx` package: **98%** (`2249/2295` statements).
-`@measured pytest --cov=verdryx --cov-report=term-missing 2026-11-23` (python 3.13 on forge; CI runs 3.11).
+Line coverage of the `verdryx` package: **98%** (`2250/2296` statements).
+`@measured CI run 45906812282, job test, pytest --cov=verdryx 2026-11-26` (python 3.11). CI holds
+it against `.coverage-floor` (97, a ratchet that only rises; the target is 90).
 Unlike the tests badge above, this figure is not gated (see CLAUDE.md invariant
 11): recomputing it inside a gate would mean running the full suite inside a
 gate, which is what the other gates already run once per CI job, so it is
