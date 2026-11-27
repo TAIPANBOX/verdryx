@@ -260,17 +260,17 @@ an absent invariant.
     alone, which only ever shows the aspiration.
     *(gate: `scripts/lock-satisfies-pyproject.sh`)*
 
-11. **Line coverage of the `verdryx` package is measured and reported on
-    every CI run and stated in the README, but it is not a merge gate.**
-    `pytest --cov=verdryx --cov-report=term-missing` in the `test` job prints
-    the total every run, and the README states the figure by hand at the
-    point it was measured. It is not recomputed by a script the way the test
-    count is (invariant 6): doing that would mean running the full suite a
-    second time inside a gate, which buys nothing the `pytest` step above it
-    did not already run. Whether a coverage number should ever fail a build
-    is the user's decision, not made here.
-    *(partly gated: CI prints the number every run; the README figure is a
-    restated `@measured` snapshot, not cross-checked by a script)*
+11. **Line coverage of the `verdryx` package is a merge gate with a floor
+    that only rises.** `@decided 2026-11-26`: every repository in the estate
+    measures coverage in CI and fails below a ratcheting floor. The `test`
+    job runs `pytest --cov=verdryx --cov-fail-under=<floor>` with the floor
+    read from `.coverage-floor` (97.0: the first CI measurement, 98.0%, less
+    one point), and `scripts/coverage-floor.sh check` reads the same run's
+    JSON report; `scripts/coverage-floor.sh ratchet` refuses a pull request
+    that lowers the floor below main's. The README states the figure of the
+    CI run it names.
+    *(gate: `--cov-fail-under` and `scripts/coverage-floor.sh check` and
+    `ratchet` in the `test` job of `.github/workflows/ci.yml`)*
 
 12. **A graded output cannot write into the judge's instructions.** The
     candidate output sits in a block whose closing tag carries a random token
